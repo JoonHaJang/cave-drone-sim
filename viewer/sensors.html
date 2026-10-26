@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>센서</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --surface-0: #0d1014;
+    --surface-1: #151a21;
+    --border: #2a323d;
+    --text-primary: #e6e9ee;
+    --text-secondary: #a9b2bf;
+    --text-muted: #7a8594;
+    --grid: #262d36;
+    --series-1: #3987e5;   /* blue   (validated dark, all-pairs, on --surface-1) */
+    --series-2: #d95926;   /* orange */
+    --series-3: #199e70;   /* aqua   */
+    --truth: #a9b2bf;      /* ground truth reference: neutral, dashed */
+    --good: #0ca30c;
+    --critical: #d03b3b;
+  }
+  html, body { margin: 0; height: 100%; background: var(--surface-0); color: var(--text-primary);
+               font: 13px/1.45 system-ui, "Malgun Gothic", sans-serif; }
+  header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 14px; margin: 0; }
+  header .spacer { flex: 1; }
+  select { background: #222a34; color: var(--text-primary); border: 1px solid #3a4452; border-radius: 4px; padding: 2px 6px; }
+  .muted { color: var(--text-muted); }
+  .secondary { color: var(--text-secondary); }
+  main { padding: 10px 12px; display: grid; gap: 10px; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; position: relative; }
+  .card h2 { font-size: 13px; margin: 0 0 2px; font-weight: 600; }
+  .card .sub { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; }
+  .legend i.dash { background: repeating-linear-gradient(90deg, var(--truth) 0 4px, transparent 4px 7px) !important; }
+  canvas { display: block; width: 100%; }
+  .tip { position: absolute; pointer-events: none; background: #0b0e12; border: 1px solid #3a4452; border-radius: 4px;
+         padding: 4px 7px; font-size: 12px; white-space: nowrap; display: none; z-index: 2; }
+  .tip b { font-weight: 600; }
+  .stats { display: flex; gap: 22px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+  .stats span b { color: var(--text-primary); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-muted); font-weight: 500; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">센서</h1>
+  <label class="secondary">드론 <select id="drone"></select></label>
+  <span class="spacer"></span>
+  <span id="clock" class="muted">연결 중...</span>
+</header>
+<main id="main"></main>
+<script type="module" src="sensors.js"></script>
+</body>
+</html>

@@ -69,7 +69,7 @@ function onInit(msg) {
     if (cave) scene.remove(cave);
     cave = gltf.scene;
     caveMat = new THREE.MeshStandardMaterial({
-      color: 0x9c8b76, roughness: 0.95, side: THREE.DoubleSide,
+      color: 0xc9b496, roughness: 0.9, side: THREE.DoubleSide,
       transparent: true, opacity: $("opacity").value / 100, depthWrite: false,
     });
     cave.traverse((o) => { if (o.isMesh) o.material = caveMat; });
@@ -158,10 +158,12 @@ function onState(msg) {
   msg.drones.forEach((d, i) => {
     const g = drones[i];
     g.body.position.copy(v3(d.pos));
-    g.body.rotation.z = d.yaw;
+    g.body.rotation.set(0, 0, 0);
+    g.body.rotateZ(d.yaw);
+    if (d.rp) { g.body.rotateY(d.rp[1]); g.body.rotateX(d.rp[0]); }
     g.body.material.emissiveIntensity = d.status === "crashed" || d.status === "dead" ? 0 : 0.4;
-    g.ghost.position.copy(v3(d.odom));
-    g.ghost.visible = show("cOdom");
+    if (d.odom) g.ghost.position.copy(v3(d.odom));
+    g.ghost.visible = show("cOdom") && !!d.odom;
     if (d.lidar && show("cLidar")) {
       g.lidar.geometry.setAttribute("position", new THREE.Float32BufferAttribute(d.lidar, 3));
       g.lidar.visible = true;
@@ -170,7 +172,7 @@ function onState(msg) {
     }
     const dbg = d.debug || {};
     const dv = show("cDebug");
-    if (dbg.path && dbg.path.length) { setLine(g.path, [d.odom, ...dbg.path.slice().reverse()]); }
+    if (dbg.path && dbg.path.length) { setLine(g.path, [d.odom || d.pos, ...dbg.path.slice().reverse()]); }
     g.path.visible = dv && !!(dbg.path && dbg.path.length);
     g.goal.visible = dv && !!dbg.goal;
     if (dbg.goal) g.goal.position.copy(v3(dbg.goal));
@@ -182,8 +184,9 @@ function onState(msg) {
     const el = $("drones").children[i];
     el.querySelector(".st").textContent = STATUS_KO[d.status] || d.status;
     el.querySelector(".mode").textContent = dbg.mode ? `모드: ${dbg.mode}` : "";
-    const drift = Math.hypot(d.pos[0] - d.odom[0], d.pos[1] - d.odom[1], d.pos[2] - d.odom[2]);
-    el.querySelector(".drift").textContent = `추정 오차 ${drift.toFixed(2)} m`;
+    el.querySelector(".drift").textContent = d.odom
+      ? `추정 오차 ${Math.hypot(d.pos[0] - d.odom[0], d.pos[1] - d.odom[1], d.pos[2] - d.odom[2]).toFixed(2)} m`
+      : "오도메트리 꺼짐";
     const b = el.querySelector(".batt");
     b.style.width = `${100 * d.battery}%`;
     b.style.background = d.battery > 0.4 ? "#51cf66" : d.battery > 0.2 ? "#fcc419" : "#ff6b6b";
@@ -224,7 +227,7 @@ function onDone(msg) {
 function connect() {
   const port = new URLSearchParams(location.search).get("ws") || "8765";
   ws = new WebSocket(`ws://${location.hostname}:${port}`);
-  ws.onopen = () => { $("status").textContent = "연결됨"; };
+  ws.onopen = () => { $("status").textContent = "연결됨"; ws.send(JSON.stringify({ cmd: "viewer" })); };
   ws.onclose = () => { $("status").textContent = "연결 끊김 (서버 종료?)"; };
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
@@ -245,6 +248,17 @@ $("pause").onclick = () => {
 $("speed").onchange = (e) => ws.send(JSON.stringify({ cmd: "speed", value: Number(e.target.value) }));
 $("opacity").oninput = (e) => { if (caveMat) { caveMat.opacity = e.target.value / 100; caveMat.depthWrite = e.target.value > 90; } };
 $("final").onclick = () => { $("final").style.display = "none"; };
+
+// One separate window per sensor, for the drone selected in the HUD.
+const SENSOR_WIN = { lidar: [960, 820], imu: [900, 560], alt: [900, 560], odom: [1000, 480], status: [760, 420] };
+document.querySelectorAll("[data-sensor]").forEach((b) => {
+  b.onclick = () => {
+    const kind = b.dataset.sensor, [w, h] = SENSOR_WIN[kind];
+    const port = new URLSearchParams(location.search).get("ws") || "8765";
+    window.open(`sensors.html?sensor=${kind}&drone=${selected}&ws=${port}`, `sensor_${kind}_${selected}`,
+                `width=${w},height=${h}`);
+  };
+});
 
 renderer.setAnimationLoop(() => {
   controls.update();

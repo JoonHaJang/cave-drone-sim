@@ -9,7 +9,7 @@ Beating this baseline is the point of the term project.
 """
 import numpy as np
 
-from cavesim.api import Agent, Command
+from cavesim.api import Agent, Command, body_rotation
 
 CRUMB_STEP = 2.0      # m between breadcrumbs
 CELL = 2.5            # m, visited-cell size for the novelty bonus
@@ -69,7 +69,8 @@ class ExplorerAgent(Agent):
         if not close.any():
             return np.zeros(3)
         push = -(pts[close] / d[close, None]) * ((1.6 - d[close]) / 1.6)[:, None]
-        return rot_z(obs.yaw) @ (2.0 * push.sum(0) / max(1, close.sum() ** 0.5))
+        R = body_rotation(obs.roll, obs.pitch, obs.yaw)   # LiDAR tilts with the airframe
+        return R @ (2.0 * push.sum(0) / max(1, close.sum() ** 0.5))
 
     def hold_middle(self, obs):
         """Vertical speed that keeps the drone halfway between floor and ceiling."""
@@ -124,7 +125,7 @@ class ExplorerAgent(Agent):
     # ------------------------------------------------------------- artifacts
     def remember(self, obs):
         for det in obs.detections:
-            pos = obs.pos + rot_z(obs.yaw) @ det.rel_pos
+            pos = obs.pos + body_rotation(obs.roll, obs.pitch, obs.yaw) @ det.rel_pos
             for a in self.artifacts:
                 if a["type"] == det.type and np.linalg.norm(a["pos"] - pos) < 4.0:
                     a["pos"] = (a["pos"] * a["n"] + pos) / (a["n"] + 1)

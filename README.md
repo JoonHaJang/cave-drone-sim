@@ -60,7 +60,7 @@ numpy BLAS ok
 OK. Next: python -m cavesim.run
 ```
 
-`[error] The folder path contains Korean...`이 나오면 2단계로 돌아가 영문 경로로 옮기세요. 그 밖의 오류는 [6. 문제 해결](#6-문제-해결)을 보세요.
+`[error] The folder path contains Korean...`이 나오면 2단계로 돌아가 영문 경로로 옮기세요. 그 밖의 오류는 [7. 문제 해결](#7-문제-해결)을 보세요.
 
 ### 4단계. 첫 실행
 
@@ -113,43 +113,60 @@ python -m cavesim.check
 - 왼쪽 위 드론 이름을 누르고 `선택 드론 따라가기`를 켜면 카메라가 그 드론을 따라갑니다.
 - 임무가 끝나면 화면 가운데에 최종 점수가 뜹니다. 누르면 닫힙니다.
 
-### 2-3. 내 에이전트로 실행
+### 2-3. 센서 창
 
-`agents	emplate.py`를 복사해 팀 파일을 만들고, `--agent`로 지정합니다.
+왼쪽 위에서 드론을 고른 뒤 `선택한 드론의 센서 창 열기` 아래 버튼을 누르면, 그 센서만 보여 주는 창이 따로 열립니다. 창마다 위쪽에서 드론을 바꿀 수 있고, 차트 위에 마우스를 올리면 값이 나옵니다.
+
+| 버튼 | 보여 주는 것 |
+|---|---|
+| LiDAR | 거리 영상(32채널 × 512방위)과 위에서 본 수평 스캔 |
+| IMU | 가속도계·자이로 3축, 240 Hz 원시값 |
+| 고도 | 기압 고도와 실제 고도, 하방 거리센서 |
+| 위치 추정 | 오도메트리 궤적과 실제 궤적, 오차 |
+| 상태 | 통신 연결, 자세(추정/실제), 탐지된 목표물 |
+
+점선으로 그려진 "실제" 값은 교수자 확인용 정답이고, 에이전트는 받지 못합니다.
+
+창이 안 열리면 브라우저의 팝업 차단을 `localhost`에 대해 풀어 주세요.
+
+### 2-4. 내 에이전트로 실행
+
+`agents\template.py`를 복사해 팀 파일을 만들고, `--agent`로 지정합니다.
 
 ```
-copy agents	emplate.py agents	eam1.py
+copy agents\template.py agents\team1.py
 python -m cavesim.run --agent agents.team1
 ```
 
 코드를 고친 뒤에는 `Ctrl+C`로 끄고 다시 실행합니다. 에이전트에서 오류가 나면 Miniforge Prompt에 오류 내용이 찍히고, 그 드론은 그 틱 동안 제자리에 멈춥니다.
 
-### 2-4. 자주 쓰는 실행 예
+### 2-5. 자주 쓰는 실행 예
 
 ```
-:: 드론 4대, 위치 오차 크게, 5배속
-python -m cavesim.run --agent agents.team1 --drones 4 --odom hard --speed 5
+:: 드론 4대, 위치 오차 크게
+python -m cavesim.run --agent agents.team1 --drones 4 --odom hard
 
 :: 다른 맵으로
 python -m cavesim.run --map small_2
 
-:: 뷰어 없이 점수만 (빠름)
-python -m cavesim.run --agent agents.team1 --headless
+:: 뷰어 없이 점수만. 여러 번 비교할 때는 lite가 훨씬 빠릅니다
+python -m cavesim.run --agent agents.team1 --headless --lidar lite
 
 :: 새 맵 만들기 (maps\medium_7 이 생김)
 python -m cavesim.cavegen --size medium --seed 7
 ```
 
-### 2-5. 옵션 전체
+### 2-6. 옵션 전체
 
 | 옵션 | 뜻 | 기본값 |
 |---|---|---|
 | `--agent agents.explorer` | 사용할 에이전트 모듈. `모듈:클래스`도 됩니다 | `agents.explorer` |
 | `--map medium_1` | `maps` 아래 폴더 이름 | `medium_1` |
 | `--drones 3` | 드론 수 (1~9) | 3 |
-| `--odom hard` | 위치 추정 오차 수준: `perfect`, `default`, `hard` | `default` |
+| `--odom hard` | 오도메트리 품질: `perfect`, `default`, `hard`, `off`(위치를 주지 않음) | `default` |
+| `--lidar lite` | LiDAR 사양: `os0-32`(실제 센서 사양), `lite`(빔 1/4, 약 4배 빠름), `ideal`(잡음 없음) | `os0-32` |
 | `--seed 0` | 센서 잡음 시드. 같은 시드면 같은 결과가 나옵니다 | 0 |
-| `--speed 5` | 실시간 대비 배속, 0이면 최대 속도 | 2 |
+| `--speed 5` | 실시간 대비 배속, 0이면 최대 속도 | 1 |
 | `--headless` | 뷰어 없이 점수만 출력 | |
 | `--wait` | 뷰어가 접속한 뒤에 시작 | |
 | `--no-browser` | 브라우저를 자동으로 열지 않음 | |
@@ -157,7 +174,7 @@ python -m cavesim.cavegen --size medium --seed 7
 
 맵 크기는 `small`, `medium`, `large` 세 가지입니다.
 
-### 2-6. 화면에 보이는 것
+### 2-7. 화면에 보이는 것
 
 - 색 공: 드론의 실제 위치. 앞쪽 원뿔이 머리 방향입니다.
 - 같은 색 와이어 공과 점선: 드론이 *추정한* 위치와 궤적입니다. 실제 위치와 벌어지는 만큼이 오도메트리 오차입니다.
@@ -165,17 +182,36 @@ python -m cavesim.cavegen --size medium --seed 7
 - 회색 팔면체: 목표물 정답 위치(교수자 확인용, 체크박스로 끌 수 있음). 보고에 성공하면 초록색이 됩니다.
 - 흰 선과 흰 점: 에이전트가 `debug()`로 보낸 경로·목표점입니다.
 
-## 3. 규칙
+## 3. 센서
+
+카메라는 쓰지 않습니다. 사양은 실제 제품 자료를 기준으로 잡았고, 숫자는 모두 `cavesim/config.py`에 있습니다. 센서는 기체에 고정돼 있어서, 드론이 가속하려고 기울면(최대 25°) LiDAR와 거리센서도 같이 기울어집니다.
+
+| 센서 | 기준 | 주요 사양 | `Observation` 필드 |
+|---|---|---|---|
+| 3D LiDAR | Ouster OS0-32 (DARPA SubT 우승팀 CERBERUS 드론 탑재 기종) | 32채널, 수직 ±45°, 방위 512칸, 10 Hz, 최소 0.3 m. 거리 잡음 1~2 cm(15 m 넘으면 5 cm). 멀수록, 벽을 비스듬히 볼수록 반사가 빠짐 | `lidar`, `lidar_ranges`, `lidar_dirs` |
+| IMU | ADIS16448 (RotorS/Gazebo 기본값) | 240 Hz. 백색잡음, 켜질 때 생기는 바이어스, 천천히 변하는 바이어스. 가속도계는 중력을 포함한 비력을 잼 | `imu` (틱마다 24개 샘플) |
+| 하방 거리센서 | Benewake TFmini Plus | 0.1~12 m, 잡음 3 cm(5 m 넘으면 거리의 약 0.6%) | `range_down` |
+| 기압계 | BMP388급 | 이륙 지점 기준 고도, 잡음 0.1 m + 시간에 따라 쌓이는 드리프트 | `baro_alt` |
+| 자세 | 비행제어기 추정값 | 롤·피치, 잡음 0.3° 정도 | `roll`, `pitch` |
+| 오도메트리 | 기체 내장 LiDAR-관성 오도메트리(LIO) 출력을 흉내 낸 값 | 이동 거리와 시간에 따라 위치와 방향 오차가 쌓임. `--odom off`면 위치와 속도를 주지 않음 | `pos`, `vel`, `yaw` |
+
+LiDAR 점을 오도메트리 좌표로 옮길 때는 롤·피치까지 반영해야 합니다. `cavesim.api.body_to_odom(obs, obs.lidar)`를 쓰면 됩니다.
+
+`--odom off`로 실행하면 IMU와 LiDAR만으로 위치를 직접 추정해야 합니다. 상위 과제나 가산점 과제로 쓸 수 있습니다.
+
+`os0-32` LiDAR는 드론 1대당 스캔 한 번에 약 20 ms가 걸려서, 드론 3대면 실시간보다 약간 빠른 정도가 한계입니다. 느린 PC나 반복 실험에는 `--lidar lite`를 쓰세요.
+
+## 4. 규칙
 
 - **임무 시간** 600초, **배터리**는 제자리 비행 기준 480초입니다. 빨리 날수록 조금 더 빨리 닳습니다.
-- **GPS 없음**: 에이전트는 실제 위치를 받지 못합니다. 받는 것은 드리프트가 쌓이는 오도메트리, LiDAR, 목표물 탐지기, 통신 메시지입니다.
+- **GPS 없음**: 에이전트는 실제 위치를 받지 못합니다. 받는 것은 아래 센서 값과 목표물 탐지기, 통신 메시지입니다.
 - **충돌**: 벽이나 다른 드론에 1 m/s보다 빠르게 부딪히면 추락합니다. 살짝 스치는 정도는 괜찮습니다.
 - **통신**: 거리 25 m 이내이면서 시야가 트여 있어야 합니다. 기지(원점)도 같은 조건입니다. 메시지는 다음 틱에 도착합니다.
 - **보고**: `Command.reports`로 보고하며, 그 순간 기지와 직접 통신이 돼야 받아들여집니다. 위치는 오도메트리 좌표로 보내고, 정답에서 5 m 안이고 종류가 같으면 인정됩니다. 보고 횟수는 목표물 수의 2배로 제한됩니다.
 - **귀환**: 임무가 끝났을 때 기지에서 수평 3 m 안에 착륙해 있으면 귀환으로 칩니다.
 - **점수** = 목표물 10점 × 개수 + 귀환 5점 × 대수 + 탐사율 × 20
 
-## 4. 에이전트 작성
+## 5. 에이전트 작성
 
 `agents/template.py`를 복사해서 시작합니다.
 
@@ -185,7 +221,9 @@ from cavesim.api import Agent, Command
 class MyAgent(Agent):
     def step(self, obs):
         # obs.pos, obs.yaw  : 추정 위치·방향 (오도메트리 좌표)
-        # obs.lidar         : (N,3) 장애물 점, 기체 좌표
+        # obs.roll, pitch   : 기체 기울기
+        # obs.lidar         : (N,3) 장애물 점, 기체 좌표 (body_to_odom으로 변환)
+        # obs.imu           : (24,7) IMU 원시 샘플
         # obs.detections    : 시야에 들어온 목표물
         # obs.inbox         : 받은 메시지
         return Command(vel=(1.0, 0, 0), yaw_rate=0.0)
@@ -207,12 +245,13 @@ from agents.explorer import Agent
 print(run_mission("maps/medium_1", Agent, n_drones=3, odom="hard", seed=1))
 ```
 
-## 5. 폴더 구조
+## 6. 폴더 구조
 
 ```
 cavesim/        시뮬레이터 (학생은 수정하지 않음)
   api.py        Observation / Command / Agent 정의
-  sim.py        물리, 센서, 통신, 채점
+  sim.py        물리, 통신, 채점
+  sensors.py    센서 모델 (LiDAR, IMU, 거리센서, 기압계)
   cavegen.py    동굴 맵 생성기
   config.py     모든 상수 (속도 한계, 센서 사양 등)
   run.py        실행기 + 뷰어 서버
@@ -225,7 +264,7 @@ maps/           생성된 맵 (truth.json은 채점용 정답)
 tests/          자동 테스트 (pytest)
 ```
 
-## 6. 문제 해결
+## 7. 문제 해결
 
 | 증상 | 원인과 해결 |
 |---|---|

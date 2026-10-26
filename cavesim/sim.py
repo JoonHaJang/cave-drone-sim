@@ -1,8 +1,10 @@
 """Simulator core: PyBullet world, drone dynamics, sensors, comms and scoring.
 
 The drone is a point-mass sphere driven by a velocity controller whose thrust is
-limited the way a real quadrotor's is (max tilt, max climb). That keeps the physics
-honest about inertia and collisions without making students tune attitude loops.
+limited the way a real quadrotor's is (max tilt, max climb). The airframe attitude
+follows the thrust direction with a short lag, so body-fixed sensors tilt and the
+IMU sees realistic specific force and angular rate. That keeps the physics honest
+about inertia and collisions without making students tune attitude loops.
 """
 import json
 import pickle
@@ -15,13 +17,11 @@ from pybullet_utils.bullet_client import BulletClient
 
 from . import config as C
 from .api import Command, Detection, Observation
+from .sensors import (Barometer, Imu, Lidar, Rangefinder, angular_velocity, attitude_from_thrust,
+                      roll_pitch, rot_z)
 
 CAVE_GROUP, DRONE_GROUP = 1, 2
-
-
-def rot_z(a):
-    c, s = np.cos(a), np.sin(a)
-    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+ATTITUDE_EST_STD = 0.005   # rad, flight-controller roll/pitch estimate noise
 
 
 def wrap(a):
@@ -29,20 +29,29 @@ def wrap(a):
 
 
 class Drone:
-    def __init__(self, pb, i, body, pos, rng, odom: C.OdomParams):
+    def __init__(self, pb, i, body, pos, rng, odom, cfg: C.SimConfig):
         self.pb = pb
         self.id = i
         self.body = body
         self.rng = rng
-        self.op = odom
+        self.odom_on = odom is not None
+        self.op = odom or C.ODOM_PRESETS["default"]   # heading still drifts when odom is off
         self.yaw = 0.0
+        self.thrust_dir = np.array([0.0, 0.0, 1.0])
+        self.R = np.eye(3)
         self.status = "flying"          # flying | landing | landed | crashed | dead
         self.battery = 1.0
         self.cmd = Command()
+        self.imu = Imu(cfg.imu, rng)
+        self.baro = Barometer(cfg.baro, pos[2])
+        self.imu_buf = []
+        self.last_obs = None
+        self.last_scan = None           # (ranges, R, pos) of the latest LiDAR sweep
+        self.last_truth = None          # ground truth at the moment of last_obs
         # Odometry state
         self.odom_pos = np.array(pos, dtype=float)
         self.yaw_err = 0.0
-        self.scale = 1.0 + rng.normal(0, odom.scale_error_std)
+        self.scale = 1.0 + rng.normal(0, self.op.scale_error_std)
         self.last_true = np.array(pos, dtype=float)
         self.last_yaw = 0.0
         self.distance = 0.0
@@ -83,10 +92,12 @@ class Drone:
 
 class Simulator:
     def __init__(self, map_dir, n_drones, agent_factory, cfg: C.SimConfig = None,
-                 odom="default", seed=0):
+                 odom="default", lidar=None, seed=0):
         self.cfg = cfg or C.SimConfig()
         if isinstance(odom, str):
             self.cfg.odom = C.ODOM_PRESETS[odom]
+        if isinstance(lidar, str):
+            self.cfg.lidar = C.LIDAR_PRESETS[lidar]
         self.map_dir = Path(map_dir)
         self.meta = json.loads((self.map_dir / "map.json").read_text())
         self.artifacts = json.loads((self.map_dir / "truth.json").read_text())["artifacts"]
@@ -100,8 +111,8 @@ class Simulator:
         self.pb.setTimeStep(self.cfg.dt)
         mesh = np.load(self.map_dir / "mesh.npz")
         col = self.pb.createCollisionShape(p.GEOM_MESH, vertices=mesh["vertices"].tolist(),
-                                     indices=mesh["faces"].reshape(-1).tolist(),
-                                     flags=p.GEOM_FORCE_CONCAVE_TRIMESH)
+                                           indices=mesh["faces"].reshape(-1).tolist(),
+                                           flags=p.GEOM_FORCE_CONCAVE_TRIMESH)
         self.cave = self.pb.createMultiBody(0, col)
         self.pb.setCollisionFilterGroupMask(self.cave, -1, CAVE_GROUP, CAVE_GROUP | DRONE_GROUP)
 
@@ -112,13 +123,12 @@ class Simulator:
             body = self.pb.createMultiBody(dp.mass, sphere, basePosition=pos.tolist())
             self.pb.changeDynamics(body, -1, linearDamping=0, angularDamping=0, restitution=0.1)
             self.pb.setCollisionFilterGroupMask(body, -1, DRONE_GROUP, CAVE_GROUP | DRONE_GROUP)
-            self.drones.append(Drone(self.pb, i, body, pos, np.random.default_rng([seed, i]), self.cfg.odom))
+            self.drones.append(Drone(self.pb, i, body, pos, np.random.default_rng([seed, i]),
+                                     self.cfg.odom, self.cfg))
 
-        lp = self.cfg.lidar
-        el = np.radians(np.linspace(*lp.vfov_deg, lp.channels))
-        az = np.linspace(-np.pi, np.pi, lp.azimuth_steps, endpoint=False)
-        E, A = np.meshgrid(el, az, indexing="ij")
-        self.lidar_dirs = np.stack([np.cos(E) * np.cos(A), np.cos(E) * np.sin(A), np.sin(E)], -1).reshape(-1, 3)
+        self.lidar = Lidar(self.cfg.lidar, dp.radius + 0.02)
+        self.lidar_dirs = self.lidar.dirs
+        self.rangefinder = Rangefinder(self.cfg.rangefinder)
 
         self.reports_left = self.cfg.reports_per_artifact * len(self.artifacts)
         self.found = {}               # artifact id -> (drone id, time)
@@ -157,9 +167,13 @@ class Simulator:
             "crash_speed": c.drone.crash_speed,
             "hover_endurance_s": c.drone.hover_endurance_s,
             "lidar_max_range": c.lidar.max_range,
+            "lidar_min_range": c.lidar.min_range,
             "lidar_channels": c.lidar.channels,
             "lidar_azimuth_steps": c.lidar.azimuth_steps,
             "lidar_vfov_deg": c.lidar.vfov_deg,
+            "imu_rate_hz": c.imu.rate_hz,
+            "rangefinder_max_range": c.rangefinder.max_range,
+            "odom_available": c.odom is not None,
             "comms_range": c.comms.max_range,
             "max_msg_bytes": c.comms.max_msg_bytes,
             "detector_range": c.detector.max_range,
@@ -176,22 +190,6 @@ class Simulator:
         r = self.pb.rayTest(a.tolist(), b.tolist(), collisionFilterMask=CAVE_GROUP)[0]
         return r[0] != self.cave
 
-    def lidar(self, d: Drone):
-        lp = self.cfg.lidar
-        pos = d.true_pos()
-        dirs_w = self.lidar_dirs @ rot_z(d.yaw).T
-        start = pos + dirs_w * (self.cfg.drone.radius + 0.02)
-        end = pos + dirs_w * lp.max_range
-        ranges = np.full(len(dirs_w), np.inf)
-        for k in range(0, len(dirs_w), 16000):
-            hits = self.pb.rayTestBatch(start[k:k + 16000].tolist(), end[k:k + 16000].tolist())
-            for m, h in enumerate(hits):
-                if h[0] >= 0:
-                    ranges[k + m] = np.linalg.norm(np.array(h[3]) - pos)
-        hit = np.isfinite(ranges)
-        ranges[hit] += d.rng.normal(0, lp.range_noise_std, hit.sum())
-        return ranges
-
     def detect(self, d: Drone):
         dp = self.cfg.detector
         pos = d.true_pos()
@@ -207,7 +205,7 @@ class Simulator:
                 continue
             if not self.los(pos, np.array(a["pos"]) + [0, 0, 0.2]):
                 continue
-            body = rot_z(-d.yaw) @ rel + d.rng.normal(0, dp.pos_noise_std, 3)
+            body = d.R.T @ rel + d.rng.normal(0, dp.pos_noise_std, 3)
             out.append(Detection(a["type"], body))
         return out
 
@@ -228,7 +226,7 @@ class Simulator:
         return [b if a == i else a for a, b in self.links if i in (a, b)]
 
     # ---------------------------------------------------------------- control
-    def apply_thrust(self, d: Drone):
+    def apply_thrust(self, d: Drone, dt):
         dp = self.cfg.drone
         v = d.true_vel()
         if d.status in ("landed", "crashed", "dead"):
@@ -248,7 +246,13 @@ class Simulator:
         if axy > amax:
             a[:2] *= amax / axy
         a[2] = np.clip(a[2], -4.0, 4.0)
-        f = dp.mass * (a + [0, 0, C.GRAVITY]) + dp.linear_drag * v_cmd - dp.linear_drag * v
+        # The airframe tilts toward the commanded thrust direction with a short lag,
+        # and the thrust actually produced points along the airframe z axis.
+        want = a + [0, 0, C.GRAVITY]
+        d.thrust_dir += (want / np.linalg.norm(want) - d.thrust_dir) * min(1.0, dt / dp.attitude_tau)
+        d.thrust_dir /= np.linalg.norm(d.thrust_dir)
+        thrust = dp.mass * np.linalg.norm(want) / max(d.thrust_dir @ (want / np.linalg.norm(want)), 0.5)
+        f = thrust * d.thrust_dir + dp.linear_drag * v_cmd - dp.linear_drag * v
         self.pb.applyExternalForce(d.body, -1, f.tolist(), d.true_pos().tolist(), p.WORLD_FRAME)
 
     def check_contacts(self, d: Drone, v_before):
@@ -265,17 +269,29 @@ class Simulator:
 
     # ------------------------------------------------------------------- loop
     def observe(self, d: Drone):
-        ranges = self.lidar(d)
-        d.last_ranges = ranges
+        pos = d.true_pos()
+        ranges = self.lidar.scan(self.pb, pos, d.R, d.rng)
+        d.last_scan = (ranges, d.R.copy(), pos)
         hit = np.isfinite(ranges)
-        v_body = rot_z(-d.yaw) @ d.true_vel() + d.rng.normal(0, 0.03, 3)
+        roll, pitch = roll_pitch(d.R)
+        odom = d.odom_on
         obs = Observation(
-            t=self.t, drone_id=d.id, pos=d.odom_pos.copy(), yaw=d.odom_yaw, vel=v_body,
-            battery=d.battery, lidar=self.lidar_dirs[hit] * ranges[hit, None],
-            lidar_dirs=self.lidar_dirs, lidar_ranges=ranges, detections=self.detect(d),
+            t=self.t, drone_id=d.id,
+            pos=d.odom_pos.copy() if odom else None,
+            vel=rot_z(d.yaw_err) @ d.true_vel() + d.rng.normal(0, 0.03, 3) if odom else None,
+            yaw=d.odom_yaw,
+            roll=roll + d.rng.normal(0, ATTITUDE_EST_STD), pitch=pitch + d.rng.normal(0, ATTITUDE_EST_STD),
+            imu=np.array(d.imu_buf).reshape(-1, 7),
+            lidar=self.lidar_dirs[hit] * ranges[hit, None], lidar_dirs=self.lidar_dirs, lidar_ranges=ranges,
+            range_down=self.rangefinder.measure(self.pb, pos, d.R, d.rng),
+            baro_alt=d.baro.measure(pos[2], 1.0 / self.cfg.agent_hz, d.rng),
+            battery=d.battery, detections=self.detect(d),
             inbox=d.inbox, neighbors=self.neighbors(d.id), base_link=d.id in self.base_links,
             report_results=d.report_results, landed=d.status == "landed")
-        d.inbox, d.report_results = [], []
+        d.inbox, d.report_results, d.imu_buf = [], [], []
+        d.last_obs = obs
+        d.last_truth = {"pos": np.round(pos, 3).tolist(), "yaw": round(d.yaw, 4),
+                        "rp": [round(roll, 4), round(pitch, 4)], "z": round(float(pos[2]), 3)}
         return obs
 
     def step(self):
@@ -286,8 +302,9 @@ class Simulator:
         for d, agent in zip(self.drones, self.agents):
             if not d.active:
                 continue
+            obs = self.observe(d)
             try:
-                cmd = agent.step(self.observe(d))
+                cmd = agent.step(obs)
                 if not isinstance(cmd, Command):
                     raise TypeError(f"step() must return a Command, got {type(cmd).__name__}")
             except Exception:
@@ -302,17 +319,25 @@ class Simulator:
             outgoing.append((d, cmd))
         self.deliver(outgoing)
 
-        tick_dt = 1.0 / cfg.agent_hz
-        for d in self.drones:
-            d.yaw = wrap(d.yaw + np.clip(d.cmd.yaw_rate, -cfg.drone.max_yaw_rate, cfg.drone.max_yaw_rate)
-                         * tick_dt) if d.status == "flying" else d.yaw
-        for _ in range(cfg.steps_per_tick):
+        dt = cfg.dt
+        g = np.array([0.0, 0.0, C.GRAVITY])
+        for k in range(cfg.steps_per_tick):
             vels = [d.true_vel() for d in self.drones]
+            prev_R = [d.R for d in self.drones]
             for d in self.drones:
-                self.apply_thrust(d)
+                if d.status == "flying":
+                    rate = np.clip(d.cmd.yaw_rate, -cfg.drone.max_yaw_rate, cfg.drone.max_yaw_rate)
+                    d.yaw = wrap(d.yaw + rate * dt)
+                self.apply_thrust(d, dt)
+                d.R = attitude_from_thrust(d.thrust_dir, d.yaw)
             self.pb.stepSimulation()
-            for d, v in zip(self.drones, vels):
+            for d, v, R0 in zip(self.drones, vels, prev_R):
                 self.check_contacts(d, v)
+                if d.active:
+                    accel = (d.true_vel() - v) / dt
+                    d.imu_buf.append(d.imu.sample(self.t + (k + 1) * dt, d.R.T @ (accel + g),
+                                                  angular_velocity(R0, d.R, dt)))
+        tick_dt = 1.0 / cfg.agent_hz
         self.t += tick_dt
         self.tick += 1
 
@@ -396,14 +421,16 @@ class Simulator:
         for d, agent in zip(self.drones, self.agents):
             entry = {
                 "id": d.id, "pos": np.round(d.true_pos(), 2).tolist(), "yaw": round(d.yaw, 3),
-                "odom": np.round(d.odom_pos, 2).tolist(), "odom_yaw": round(d.odom_yaw, 3),
-                "status": d.status, "battery": round(d.battery, 3),
+                "rp": [round(x, 3) for x in roll_pitch(d.R)],
+                "odom": np.round(d.odom_pos, 2).tolist() if d.odom_on else None,
+                "odom_yaw": round(d.odom_yaw, 3), "status": d.status, "battery": round(d.battery, 3),
             }
-            r = getattr(d, "last_ranges", None)
-            if lidar and d.active and r is not None:
+            if lidar and d.active and d.last_scan is not None:
+                r, R, pos = d.last_scan
                 hit = np.isfinite(r)
-                pts = (self.lidar_dirs[hit] * r[hit, None]) @ rot_z(d.yaw).T + d.true_pos()
-                entry["lidar"] = np.round(pts[::2], 2).reshape(-1).tolist()
+                pts = (self.lidar_dirs[hit] * r[hit, None]) @ R.T + pos
+                step = max(1, len(pts) // 3000)
+                entry["lidar"] = np.round(pts[::step], 2).reshape(-1).tolist()
             try:
                 dbg = agent.debug() or {}
                 entry["debug"] = json.loads(json.dumps(dbg, default=lambda o: np.asarray(o).tolist()))
@@ -413,6 +440,33 @@ class Simulator:
         return {"type": "state", "t": round(self.t, 2), "drones": drones, "links": self.links,
                 "base_links": self.base_links, "found": sorted(self.found), "score": self.score()}
 
+    def sensor_packet(self, i):
+        """Everything one drone sensed on its latest tick, for the sensor windows.
+        Includes ground truth so the instructor can judge estimation error."""
+        d = self.drones[i]
+        o = d.last_obs
+        lp = self.cfg.lidar
+        out = {"type": "sensors", "drone": i, "t": round(self.t, 2), "status": d.status,
+               "battery": round(d.battery, 3),
+               "truth": d.last_truth,       # taken at the same instant as the observation
+               "lidar_meta": {"channels": lp.channels, "azimuth_steps": lp.azimuth_steps,
+                              "vfov_deg": list(lp.vfov_deg), "max_range": lp.max_range}}
+        if o is None:
+            return out
+        r = o.lidar_ranges
+        out.update({
+            "obs_t": round(o.t, 2),
+            "lidar_cm": np.where(np.isfinite(r), np.round(r * 100), 0).astype(int).tolist(),
+            "imu": np.round(o.imu, 4).tolist(),
+            "range_down": None if not np.isfinite(o.range_down) else round(o.range_down, 3),
+            "baro_alt": round(o.baro_alt, 3),
+            "roll": round(o.roll, 4), "pitch": round(o.pitch, 4), "yaw": round(o.yaw, 4),
+            "odom": None if o.pos is None else np.round(o.pos, 3).tolist(),
+            "detections": [{"type": det.type, "rel": np.round(det.rel_pos, 2).tolist()} for det in o.detections],
+            "neighbors": o.neighbors, "base_link": o.base_link,
+        })
+        return out
+
     def viewer_init(self):
         return {"type": "init", "map": self.map_dir.name, "base": self.base.tolist(),
                 "artifacts": self.artifacts, "n_drones": len(self.drones),
@@ -421,7 +475,7 @@ class Simulator:
 
     def trails(self):
         return {"type": "trails", "true": [d.trail for d in self.drones],
-                "odom": [d.odom_trail for d in self.drones]}
+                "odom": [d.odom_trail if d.odom_on else [] for d in self.drones]}
 
     def close(self):
         if self.pb is not None:
@@ -429,9 +483,10 @@ class Simulator:
             self.pb = None
 
 
-def run_mission(map_dir, agent_factory, n_drones=3, odom="default", seed=0, cfg=None, verbose=False):
+def run_mission(map_dir, agent_factory, n_drones=3, odom="default", lidar=None, seed=0, cfg=None,
+                verbose=False):
     """Headless run for experiments: returns the score dict."""
-    sim = Simulator(map_dir, n_drones, agent_factory, cfg=cfg, odom=odom, seed=seed)
+    sim = Simulator(map_dir, n_drones, agent_factory, cfg=cfg, odom=odom, lidar=lidar, seed=seed)
     try:
         while sim.step():
             if verbose and sim.tick % (10 * sim.cfg.agent_hz) == 0:

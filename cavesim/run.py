@@ -50,34 +50,49 @@ class Session:
         self.sim = sim
         self.speed = speed          # 1.0 = real time, 0 = as fast as possible
         self.paused = False
-        self.clients = set()
+        self.clients = set()        # 3D viewer windows
+        self.sensor_clients = {}    # sensor windows: websocket -> drone id
         self.done = False
 
     async def handler(self, ws):
-        self.clients.add(ws)
         try:
             await ws.send(json.dumps(self.sim.viewer_init()))
-            await ws.send(json.dumps(self.sim.trails()))
-            await ws.send(json.dumps(self.sim.viewer_state()))
             async for raw in ws:
                 msg = json.loads(raw)
-                if msg.get("cmd") == "pause":
+                cmd = msg.get("cmd")
+                if cmd == "viewer":
+                    self.clients.add(ws)
+                    await ws.send(json.dumps(self.sim.trails()))
+                    await ws.send(json.dumps(self.sim.viewer_state()))
+                elif cmd == "sensors":
+                    self.sensor_clients[ws] = int(msg.get("drone", 0))
+                    await ws.send(json.dumps(self.sim.sensor_packet(self.sensor_clients[ws])))
+                elif cmd == "pause":
                     self.paused = bool(msg.get("value", not self.paused))
-                elif msg.get("cmd") == "speed":
+                elif cmd == "speed":
                     self.speed = float(msg["value"])
         finally:
             self.clients.discard(ws)
+            self.sensor_clients.pop(ws, None)
 
     def broadcast(self, msg):
         data = json.dumps(msg)
         for ws in list(self.clients):
             asyncio.ensure_future(self._send(ws, data))
 
+    def send_sensors(self):
+        packets = {}
+        for ws, i in list(self.sensor_clients.items()):
+            if i not in packets:
+                packets[i] = json.dumps(self.sim.sensor_packet(i))
+            asyncio.ensure_future(self._send(ws, packets[i]))
+
     async def _send(self, ws, data):
         try:
             await ws.send(data)
         except Exception:
             self.clients.discard(ws)
+            self.sensor_clients.pop(ws, None)
 
     async def loop(self):
         sim = self.sim
@@ -92,6 +107,8 @@ class Session:
                 self.broadcast(sim.viewer_state())
                 if sim.tick % 10 == 0:
                     self.broadcast(sim.trails())
+            if self.sensor_clients:
+                self.send_sensors()
             if not running:
                 self.done = True
                 score = sim.score()
@@ -113,7 +130,7 @@ async def serve_viewer(sim, args):
             webbrowser.open(url)
         if args.wait:
             print("waiting for the viewer to connect...")
-            while not session.clients:
+            while not (session.clients or session.sensor_clients):
                 await asyncio.sleep(0.1)
         await session.loop()
         print("mission finished; viewer stays up until Ctrl+C")
@@ -126,9 +143,12 @@ def main():
     ap.add_argument("--agent", default="agents.explorer")
     ap.add_argument("--map", default="medium_1", help="folder name under maps/ or a path")
     ap.add_argument("--drones", type=int, default=3)
-    ap.add_argument("--odom", choices=["perfect", "default", "hard"], default="default")
+    ap.add_argument("--odom", choices=["perfect", "default", "hard", "off"], default="default",
+                    help="LiDAR-inertial odometry quality; off = no pos/vel, build your own")
+    ap.add_argument("--lidar", choices=["os0-32", "lite", "ideal"], default="os0-32",
+                    help="os0-32 = Ouster OS0-32 spec (slow), lite = 16x256 beams (about 4x faster)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--speed", type=float, default=2.0, help="sim speed x real time, 0 = max")
+    ap.add_argument("--speed", type=float, default=1.0, help="sim speed x real time, 0 = max")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--wait", action="store_true", help="start only after the viewer connects")
     ap.add_argument("--no-browser", action="store_true")
@@ -139,7 +159,8 @@ def main():
     map_dir = Path(args.map)
     if not map_dir.exists():
         map_dir = ROOT / "maps" / args.map
-    sim = Simulator(map_dir, args.drones, load_agent(args.agent), odom=args.odom, seed=args.seed)
+    sim = Simulator(map_dir, args.drones, load_agent(args.agent), odom=args.odom, lidar=args.lidar,
+                    seed=args.seed)
     try:
         if args.headless:
             while sim.step():

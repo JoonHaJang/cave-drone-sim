@@ -85,3 +85,57 @@ def test_report_rules():
     assert [ok for _, ok, _ in results] == [True, False]
     assert sim.score()["artifacts_found"] == 1
     sim.close()
+
+
+def test_imu_hover_matches_spec():
+    """At hover the accelerometer reads ~+g on z with the configured white noise."""
+    samples = []
+
+    class Hover(Agent):
+        def step(self, obs):
+            if obs.t > 0.5:
+                samples.append(obs.imu)
+            return Command()
+
+    sim = make(Hover, n=1, t=5)
+    while sim.step():
+        pass
+    imu = np.concatenate(samples)
+    ip = sim.cfg.imu
+    assert abs(imu[:, 3].mean() - 9.81) < 0.5
+    assert imu[:, 1:4].std(0) == pytest.approx(ip.accel_noise_density * np.sqrt(ip.rate_hz), rel=0.25)
+    assert imu[:, 4:7].std(0) == pytest.approx(ip.gyro_noise_density * np.sqrt(ip.rate_hz), rel=0.25)
+    sim.close()
+
+
+def test_sensors_tilt_and_shapes():
+    seen = []
+
+    class Dash(Agent):
+        def step(self, obs):
+            seen.append(obs)
+            return Command(vel=(2.0, 0.0, 0.0) if obs.t < 1 else (0.0, 0.0, 0.0))
+
+    sim = make(Dash, n=1, t=2, lidar="lite")
+    while sim.step():
+        pass
+    lp = sim.cfg.lidar
+    assert seen[0].lidar_ranges.shape == (lp.channels * lp.azimuth_steps,)
+    assert max(abs(o.pitch) for o in seen) > np.radians(10)      # airframe tilts to accelerate
+    assert all(o.range_down > 0.1 for o in seen)
+    assert abs(seen[-1].baro_alt) < 1.5
+    sim.close()
+
+
+def test_odom_off_hides_position():
+    seen = []
+
+    class Look(Agent):
+        def step(self, obs):
+            seen.append(obs)
+            return Command()
+
+    sim = make(Look, n=1, t=1, odom="off")
+    sim.step()
+    assert seen[0].pos is None and seen[0].vel is None and np.isfinite(seen[0].yaw)
+    sim.close()
