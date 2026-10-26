@@ -33,7 +33,7 @@ git이 있으면:
 ```
 mkdir C:\work
 cd /d C:\work
-git clone <저장소 주소> cave-drone-sim
+git clone https://github.com/JoonHaJang/cave-drone-sim.git cave-drone-sim
 cd cave-drone-sim
 ```
 
