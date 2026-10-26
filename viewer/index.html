@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Cave Drone Sim</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1014; color: #d8dee6;
+               font: 13px/1.4 system-ui, "Malgun Gothic", sans-serif; }
+  #hud { position: absolute; top: 10px; left: 10px; width: 290px; background: rgba(16,20,26,.88);
+         border: 1px solid #2a323d; border-radius: 6px; padding: 10px 12px; }
+  #hud h1 { font-size: 14px; margin: 0 0 6px; }
+  .row { display: flex; justify-content: space-between; }
+  .drone { margin-top: 6px; padding-top: 6px; border-top: 1px solid #2a323d; cursor: pointer; }
+  .drone.sel { background: rgba(80,120,170,.15); }
+  .bar { height: 5px; background: #2a323d; border-radius: 3px; margin-top: 3px; }
+  .bar > div { height: 100%; border-radius: 3px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  #controls { position: absolute; bottom: 10px; left: 10px; background: rgba(16,20,26,.88);
+              border: 1px solid #2a323d; border-radius: 6px; padding: 8px 10px; }
+  #controls label { margin-right: 10px; white-space: nowrap; }
+  button, select { background: #222a34; color: #d8dee6; border: 1px solid #3a4452; border-radius: 4px; padding: 2px 8px; }
+  #status { position: absolute; top: 10px; right: 10px; background: rgba(16,20,26,.88);
+            border: 1px solid #2a323d; border-radius: 6px; padding: 6px 10px; }
+  #final { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+           background: rgba(16,20,26,.95); border: 1px solid #4a5868; border-radius: 8px; padding: 16px 20px; }
+  #final pre { margin: 8px 0 0; }
+  .muted { color: #8793a3; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <h1>Cave Drone Sim <span class="muted" id="mapname"></span></h1>
+  <div class="row"><span>시간</span><span id="time">-</span></div>
+  <div class="row"><span>점수</span><span id="score">-</span></div>
+  <div class="row"><span>목표물</span><span id="arts">-</span></div>
+  <div class="row"><span>탐사율</span><span id="cov">-</span></div>
+  <div id="drones"></div>
+</div>
+<div id="status">연결 중...</div>
+<div id="controls">
+  <button id="pause">일시정지</button>
+  <select id="speed">
+    <option value="0.5">0.5x</option><option value="1">1x</option><option value="2" selected>2x</option>
+    <option value="5">5x</option><option value="0">최대</option>
+  </select>
+  <label><input type="checkbox" id="cTruth" checked> 목표물 정답</label>
+  <label><input type="checkbox" id="cLidar" checked> LiDAR</label>
+  <label><input type="checkbox" id="cOdom" checked> 추정 위치</label>
+  <label><input type="checkbox" id="cTrail" checked> 궤적</label>
+  <label><input type="checkbox" id="cLinks" checked> 통신</label>
+  <label><input type="checkbox" id="cDebug" checked> 에이전트 디버그</label>
+  <label><input type="checkbox" id="cFollow"> 선택 드론 따라가기</label>
+  <label>동굴 <input type="range" id="opacity" min="0" max="100" value="25" style="width:80px"></label>
+</div>
+<div id="final"><b>임무 종료</b><pre id="finalText"></pre></div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

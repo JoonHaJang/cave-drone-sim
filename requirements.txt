@@ -1,0 +1,9 @@
+# Python packages for cave-drone-sim.
+# PyBullet is NOT listed here: PyPI only ships Linux wheels (up to Python 3.11), so it
+# comes from conda-forge via environment.yml. Use setup_windows.bat / setup_unix.sh.
+numpy
+scipy
+scikit-image
+trimesh
+websockets>=13
+pytest

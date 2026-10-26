@@ -1,0 +1,15 @@
+# conda env create -f environment.yml   (or run setup_windows.bat / setup_unix.sh)
+name: cave-drone
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pybullet=3.25
+  - numpy
+  - libblas=*=*openblas   # MKL 2026.x crashes on matrix multiply on some Windows PCs
+  - scipy
+  - scikit-image
+  - trimesh
+  - websockets>=13
+  - pytest
+  - pip

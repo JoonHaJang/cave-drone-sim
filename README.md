@@ -1,0 +1,237 @@
+# Cave Drone Sim
+
+GPS가 없는 동굴에서 드론 여러 대로 탐사하고, 목표물을 찾아 보고하고, 입구로 돌아오는 시뮬레이터입니다. DARPA SubT Challenge를 단순하게 줄인 형태입니다.
+
+시뮬레이션은 Python이 합니다. PyBullet으로 충돌과 LiDAR를 계산하고, 드론 운동과 통신, 채점도 Python 쪽에서 처리합니다. 브라우저의 Three.js 뷰어는 Python이 보내 주는 동굴, 드론, LiDAR 점, 궤적, 통신 링크를 그리기만 합니다.
+
+학생이 작성하는 코드는 `cavesim.api.Agent`를 상속한 Python 클래스 하나이고, 드론마다 인스턴스가 하나씩 만들어집니다.
+
+## 1. 설치 (처음 한 번)
+
+Windows 기준입니다. 아래 상자 안의 명령을 순서대로 복사해서 붙여 넣으세요. 20분쯤 걸립니다.
+
+### 1단계. Miniforge 설치
+
+1. https://github.com/conda-forge/miniforge/releases/latest 에서 `Miniforge3-Windows-x86_64.exe`를 받아 실행합니다.
+2. 설치 창에서 **Just Me**를 고르고, 나머지는 기본값 그대로 **Next**만 누릅니다. 관리자 권한은 필요 없습니다.
+3. 시작 메뉴에서 **Miniforge Prompt**를 엽니다. 이후 명령은 전부 이 창에 입력합니다.
+
+**성공 확인**: Miniforge Prompt에 아래를 입력했을 때 버전 번호가 나오면 됩니다.
+
+```
+mamba --version
+```
+
+> 왜 pip이 아니라 Miniforge인가요? 시뮬레이터가 쓰는 PyBullet은 PyPI(pip)에 Windows용 설치 파일이 없습니다. conda-forge에는 있어서 Miniforge로 설치합니다.
+
+### 2단계. 코드 받기
+
+**주의: 폴더 경로에 한글이 들어가면 안 됩니다.** 설치 도구(mamba)가 한글 경로를 읽지 못합니다. `바탕 화면`이나 `문서` 아래가 아니라 `C:\work`에 받으세요.
+
+git이 있으면:
+
+```
+mkdir C:\work
+cd /d C:\work
+git clone <저장소 주소> cave-drone-sim
+cd cave-drone-sim
+```
+
+git이 없으면 GitHub 저장소 페이지에서 **Code → Download ZIP**으로 받습니다. `C:\work`에 압축을 풀고, 풀린 폴더 이름(`cave-drone-sim-main`)을 `cave-drone-sim`으로 바꾼 뒤 아래를 입력합니다.
+
+```
+cd /d C:\work\cave-drone-sim
+```
+
+**성공 확인**: `dir`을 입력했을 때 `setup_windows.bat`, `environment.yml`, `cavesim` 폴더가 보이면 됩니다.
+
+### 3단계. 환경 설치
+
+```
+setup_windows.bat
+```
+
+패키지를 내려받느라 5~10분 걸립니다. 끝나면 마지막에 이렇게 나옵니다.
+
+```
+numpy BLAS ok
+20 s hover test on small_2 ok (PyBullet collision + LiDAR)
+
+OK. Next: python -m cavesim.run
+```
+
+`[error] The folder path contains Korean...`이 나오면 2단계로 돌아가 영문 경로로 옮기세요. 그 밖의 오류는 [6. 문제 해결](#6-문제-해결)을 보세요.
+
+### 4단계. 첫 실행
+
+```
+conda activate cave-drone
+python -m cavesim.run
+```
+
+브라우저에 동굴과 드론 3대가 보이면 설치가 모두 끝난 것입니다. 실행 방법은 [2. 실행하기](#2-실행하기)에 자세히 있습니다.
+
+### 설치 스크립트가 하는 일
+
+`setup_windows.bat`은 아래 세 줄을 실행합니다. 스크립트가 안 되면 직접 입력해도 됩니다.
+
+```
+mamba env create -f environment.yml -y
+conda activate cave-drone
+python -m cavesim.check
+```
+
+- `environment.yml`: 실제 설치에 쓰는 패키지 목록입니다(PyBullet 포함).
+- `requirements.txt`: 같은 목록에서 PyBullet만 뺀 pip용 파일입니다. 이것만으로는 시뮬레이터가 돌아가지 않으니 설치에는 쓰지 마세요.
+
+## 2. 실행하기
+
+### 2-1. 매번 시작할 때
+
+1. 시작 메뉴에서 **Miniforge Prompt**를 엽니다.
+2. 프로젝트 폴더로 가서 환경을 켭니다. 줄 맨 앞이 `(base)`에서 `(cave-drone)`으로 바뀌면 됩니다.
+
+   ```
+   cd /d C:\work\cave-drone-sim
+   conda activate cave-drone
+   ```
+
+3. 시뮬레이터를 실행합니다.
+
+   ```
+   python -m cavesim.run
+   ```
+
+4. 브라우저가 자동으로 열립니다. 안 열리면 주소창에 http://localhost:8000/viewer/?ws=8765 를 입력합니다.
+5. 끝낼 때는 Miniforge Prompt 창에서 `Ctrl+C`를 누릅니다. 임무가 끝나도 서버는 켜진 채로 남아 있으니, 다시 실행하기 전에 꼭 `Ctrl+C`로 끄세요. 안 끄고 또 실행하면 포트가 이미 사용 중이라는 오류가 납니다.
+
+### 2-2. 뷰어 조작
+
+- 마우스 왼쪽 드래그: 회전 / 오른쪽 드래그: 이동 / 휠: 확대·축소
+- 아래 버튼: 일시정지, 배속(0.5x~최대), 표시 항목 켜고 끄기
+- `동굴` 슬라이더: 동굴 벽 투명도. 낮추면 안쪽 드론이 잘 보입니다.
+- 왼쪽 위 드론 이름을 누르고 `선택 드론 따라가기`를 켜면 카메라가 그 드론을 따라갑니다.
+- 임무가 끝나면 화면 가운데에 최종 점수가 뜹니다. 누르면 닫힙니다.
+
+### 2-3. 내 에이전트로 실행
+
+`agents	emplate.py`를 복사해 팀 파일을 만들고, `--agent`로 지정합니다.
+
+```
+copy agents	emplate.py agents	eam1.py
+python -m cavesim.run --agent agents.team1
+```
+
+코드를 고친 뒤에는 `Ctrl+C`로 끄고 다시 실행합니다. 에이전트에서 오류가 나면 Miniforge Prompt에 오류 내용이 찍히고, 그 드론은 그 틱 동안 제자리에 멈춥니다.
+
+### 2-4. 자주 쓰는 실행 예
+
+```
+:: 드론 4대, 위치 오차 크게, 5배속
+python -m cavesim.run --agent agents.team1 --drones 4 --odom hard --speed 5
+
+:: 다른 맵으로
+python -m cavesim.run --map small_2
+
+:: 뷰어 없이 점수만 (빠름)
+python -m cavesim.run --agent agents.team1 --headless
+
+:: 새 맵 만들기 (maps\medium_7 이 생김)
+python -m cavesim.cavegen --size medium --seed 7
+```
+
+### 2-5. 옵션 전체
+
+| 옵션 | 뜻 | 기본값 |
+|---|---|---|
+| `--agent agents.explorer` | 사용할 에이전트 모듈. `모듈:클래스`도 됩니다 | `agents.explorer` |
+| `--map medium_1` | `maps` 아래 폴더 이름 | `medium_1` |
+| `--drones 3` | 드론 수 (1~9) | 3 |
+| `--odom hard` | 위치 추정 오차 수준: `perfect`, `default`, `hard` | `default` |
+| `--seed 0` | 센서 잡음 시드. 같은 시드면 같은 결과가 나옵니다 | 0 |
+| `--speed 5` | 실시간 대비 배속, 0이면 최대 속도 | 2 |
+| `--headless` | 뷰어 없이 점수만 출력 | |
+| `--wait` | 뷰어가 접속한 뒤에 시작 | |
+| `--no-browser` | 브라우저를 자동으로 열지 않음 | |
+| `--http-port`, `--ws-port` | 뷰어 포트 | 8000, 8765 |
+
+맵 크기는 `small`, `medium`, `large` 세 가지입니다.
+
+### 2-6. 화면에 보이는 것
+
+- 색 공: 드론의 실제 위치. 앞쪽 원뿔이 머리 방향입니다.
+- 같은 색 와이어 공과 점선: 드론이 *추정한* 위치와 궤적입니다. 실제 위치와 벌어지는 만큼이 오도메트리 오차입니다.
+- 초록 선: 통신 링크(드론끼리, 드론과 기지).
+- 회색 팔면체: 목표물 정답 위치(교수자 확인용, 체크박스로 끌 수 있음). 보고에 성공하면 초록색이 됩니다.
+- 흰 선과 흰 점: 에이전트가 `debug()`로 보낸 경로·목표점입니다.
+
+## 3. 규칙
+
+- **임무 시간** 600초, **배터리**는 제자리 비행 기준 480초입니다. 빨리 날수록 조금 더 빨리 닳습니다.
+- **GPS 없음**: 에이전트는 실제 위치를 받지 못합니다. 받는 것은 드리프트가 쌓이는 오도메트리, LiDAR, 목표물 탐지기, 통신 메시지입니다.
+- **충돌**: 벽이나 다른 드론에 1 m/s보다 빠르게 부딪히면 추락합니다. 살짝 스치는 정도는 괜찮습니다.
+- **통신**: 거리 25 m 이내이면서 시야가 트여 있어야 합니다. 기지(원점)도 같은 조건입니다. 메시지는 다음 틱에 도착합니다.
+- **보고**: `Command.reports`로 보고하며, 그 순간 기지와 직접 통신이 돼야 받아들여집니다. 위치는 오도메트리 좌표로 보내고, 정답에서 5 m 안이고 종류가 같으면 인정됩니다. 보고 횟수는 목표물 수의 2배로 제한됩니다.
+- **귀환**: 임무가 끝났을 때 기지에서 수평 3 m 안에 착륙해 있으면 귀환으로 칩니다.
+- **점수** = 목표물 10점 × 개수 + 귀환 5점 × 대수 + 탐사율 × 20
+
+## 4. 에이전트 작성
+
+`agents/template.py`를 복사해서 시작합니다.
+
+```python
+from cavesim.api import Agent, Command
+
+class MyAgent(Agent):
+    def step(self, obs):
+        # obs.pos, obs.yaw  : 추정 위치·방향 (오도메트리 좌표)
+        # obs.lidar         : (N,3) 장애물 점, 기체 좌표
+        # obs.detections    : 시야에 들어온 목표물
+        # obs.inbox         : 받은 메시지
+        return Command(vel=(1.0, 0, 0), yaw_rate=0.0)
+
+Agent = MyAgent
+```
+
+```
+python -m cavesim.run --agent agents.my_agent
+```
+
+에이전트가 받는 값(`Observation`)과 보낼 수 있는 명령(`Command`)은 모두 `cavesim/api.py`에 정의돼 있습니다. 시뮬레이터에서 학생이 읽어야 하는 파일은 이것 하나입니다.
+
+여러 번 돌려 성능을 비교할 때는 뷰어 없이 Python에서 바로 호출합니다.
+
+```python
+from cavesim.sim import run_mission
+from agents.explorer import Agent
+print(run_mission("maps/medium_1", Agent, n_drones=3, odom="hard", seed=1))
+```
+
+## 5. 폴더 구조
+
+```
+cavesim/        시뮬레이터 (학생은 수정하지 않음)
+  api.py        Observation / Command / Agent 정의
+  sim.py        물리, 센서, 통신, 채점
+  cavegen.py    동굴 맵 생성기
+  config.py     모든 상수 (속도 한계, 센서 사양 등)
+  run.py        실행기 + 뷰어 서버
+  check.py      설치 확인
+agents/         에이전트 (학생 작업 공간)
+  explorer.py   기본 에이전트: 반응형 탐사 + breadcrumb 귀환
+  template.py   새 에이전트 시작점
+viewer/         Three.js 뷰어
+maps/           생성된 맵 (truth.json은 채점용 정답)
+tests/          자동 테스트 (pytest)
+```
+
+## 6. 문제 해결
+
+| 증상 | 원인과 해결 |
+|---|---|
+| `pip install pybullet`이 컴파일 오류로 실패 | PyPI에는 Windows용 PyBullet이 없습니다. pip 대신 1장의 conda 방식으로 설치하세요. |
+| `mamba env create`가 파일을 못 찾음 | 경로에 한글이 있습니다. 영문 경로(예: `C:\work`)로 옮기세요. |
+| `conda env create`가 `conda-launchers` 관련 오류로 실패 | conda 26.x의 버그입니다. `mamba env create`를 쓰세요. 설치 스크립트는 이미 mamba를 씁니다. |
+| Python이 아무 메시지 없이 종료됨 (Windows 오류 코드 `0xC06D007F`) | numpy가 MKL 2026.x를 쓰면 일부 PC에서 행렬 곱셈 중에 죽습니다. `environment.yml`이 OpenBLAS로 고정해 두었으니 `mamba env update -n cave-drone -f environment.yml -y`로 다시 맞추세요. |
+| 뷰어가 "연결 끊김" | 실행기(`python -m cavesim.run`)가 꺼졌습니다. 터미널의 오류를 확인하세요. |
+| 포트 8000 또는 8765가 사용 중 | `--http-port 8001 --ws-port 8766`처럼 다른 포트를 지정하세요. |
