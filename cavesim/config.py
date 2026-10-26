@@ -101,6 +101,31 @@ ODOM_PRESETS = {
 
 
 @dataclass
+class AeroParams:
+    """Air the onboard autopilot has to fight, as an external acceleration.
+
+    Rotor wash bouncing off nearby rock turns into turbulence, a close ceiling pulls
+    the drone up into it (ceiling effect), a close floor gives extra lift (ground
+    effect), and caves carry a weak gusty draft everywhere. Gusts are a first-order
+    Gauss-Markov process; their strength grows as the clearance to rock shrinks."""
+    draft_std: float = 0.25        # m/s^2, gust strength in open air
+    gust_tau: float = 0.5          # s, gust correlation time
+    wall_turb_std: float = 1.5     # m/s^2, extra gust strength right at a wall
+    wall_range: float = 1.2        # m of clearance below which the wall turbulence starts
+    ceiling_gain: float = 0.35     # x g upward pull at zero ceiling clearance
+    ceiling_range: float = 0.8     # m
+    ground_gain: float = 0.15      # x g extra lift at zero floor clearance
+    ground_range: float = 0.6      # m
+
+
+AERO_PRESETS = {
+    "off": AeroParams(0.0, 0.5, 0.0, 1.2, 0.0, 0.8, 0.0, 0.6),
+    "default": AeroParams(),
+    "hard": AeroParams(0.5, 0.5, 3.0, 1.6, 0.5, 1.0, 0.2, 0.8),
+}
+
+
+@dataclass
 class CommsParams:
     max_range: float = 25.0          # m, needs line of sight as well
     base_range: float = 25.0
@@ -128,6 +153,7 @@ class SimConfig:
     rangefinder: RangefinderParams = field(default_factory=RangefinderParams)
     baro: BaroParams = field(default_factory=BaroParams)
     odom: OdomParams = field(default_factory=OdomParams)
+    aero: AeroParams = field(default_factory=AeroParams)
     comms: CommsParams = field(default_factory=CommsParams)
     detector: DetectorParams = field(default_factory=DetectorParams)
 

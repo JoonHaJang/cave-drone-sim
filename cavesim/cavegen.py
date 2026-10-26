@@ -2,9 +2,12 @@
 
 A random tunnel graph is grown from a staging chamber at the origin, turned into a
 signed distance field (negative = air), roughened with value noise and meshed with
-marching cubes. The same mesh feeds PyBullet (collision + LiDAR) and Three.js (render).
+marching cubes. Stalactites, stalagmites and columns are then added as separate
+cone meshes, because thin spikes would not survive the 0.5 m voxel grid. The same
+geometry feeds PyBullet (collision + LiDAR) and Three.js (render).
 
     python -m cavesim.cavegen --seed 7 --name seed7
+    python -m cavesim.cavegen --size small --seed 2 --name small_2 --speleothems 1.5
 """
 import argparse
 import json
@@ -26,6 +29,12 @@ PRESETS = {
 
 STAGING_RADIUS = 4.5
 RESOLUTION = 0.5
+
+# Speleothems per metre of tunnel (scaled by --speleothems) and per chamber.
+SPELEO_PER_M = 0.45
+SPELEO_PER_CHAMBER = 14
+SPELEO_KEEP_CLEAR = 7.0   # m around the base: take-off and landing stay free
+SPELEO_MIN_GAP = 0.9      # m of air always left between a spike and the opposite surface
 
 
 def grow_graph(rng, n_segments, bounds):
@@ -198,7 +207,124 @@ def place_artifacts(rng, field, origin, res, nodes, segs, n):
     return artifacts
 
 
-def generate(seed, size="medium", res=RESOLUTION):
+def surface_above_below(field, origin, res, p, reach=12.0, step=0.1):
+    """Ceiling and floor heights straight above and below air point p (None if out of reach)."""
+    dz = np.arange(step, reach, step)
+    out = []
+    for sign in (1, -1):
+        col = np.column_stack([np.full_like(dz, p[0]), np.full_like(dz, p[1]), p[2] + sign * dz])
+        f = sample_field(field, origin, res, col)
+        k = np.flatnonzero(f >= 0)
+        if len(k) == 0:
+            out.append(None)
+            continue
+        k = k[0]
+        f0 = sample_field(field, origin, res, p)[0] if k == 0 else f[k - 1]
+        z0 = p[2] + sign * (dz[k - 1] if k else 0.0)
+        out.append(z0 + sign * step * (-f0) / max(f[k] - f0, 1e-6))
+    return out[0], out[1]
+
+
+def lathe(rng, rings, n_seg=12):
+    """Closed mesh through horizontal rings [(center xyz, radius), ...] sorted by height."""
+    ang = np.linspace(0, 2 * np.pi, n_seg, endpoint=False)
+    verts = []
+    for c, r in rings:
+        rr = r * rng.uniform(0.88, 1.12, n_seg)        # knobbly, not lathe-perfect
+        verts.append(np.column_stack([c[0] + rr * np.cos(ang), c[1] + rr * np.sin(ang), np.full(n_seg, c[2])]))
+    verts = np.vstack(verts + [rings[0][0], rings[-1][0]])
+    bottom, top = len(verts) - 2, len(verts) - 1
+    faces = []
+    for i in range(len(rings) - 1):
+        for j in range(n_seg):
+            a, b = i * n_seg + j, i * n_seg + (j + 1) % n_seg
+            faces += [(a, b, b + n_seg), (a, b + n_seg, a + n_seg)]
+    last = (len(rings) - 1) * n_seg
+    for j in range(n_seg):
+        faces += [(bottom, (j + 1) % n_seg, j), (top, last + j, last + (j + 1) % n_seg)]
+    return trimesh.Trimesh(verts, np.array(faces), process=False)
+
+
+def speleothem_mesh(rng, s, embed=0.6, n_rings=8):
+    """Mesh for one speleothem dict. Bases sink `embed` m into the rock."""
+    x, y = s["base"][:2]
+    drift = rng.normal(0, 0.04 * s["length"], (n_rings, 2)).cumsum(0)   # slightly crooked
+    drift -= drift[0]
+    if s["kind"] == "column":
+        z0, z1 = s["floor"] - embed, s["ceiling"] + embed
+        t = np.linspace(0, 1, n_rings)
+        r = s["radius"] * (0.45 + 0.55 * np.abs(2 * t - 1) ** 1.6)
+        r[0] = r[-1] = s["radius"] * 1.1
+    else:
+        t = np.linspace(0, 1, n_rings)                  # 0 at the root, 1 at the tip
+        r = np.maximum(s["radius"] * (1 - t) ** 1.4, 0.015)
+        sign = 1 if s["kind"] == "stalagmite" else -1
+        root = s["base"][2] - sign * embed
+        z = root + sign * (embed + s["length"]) * t
+        if sign < 0:                                    # rings must go bottom to top
+            t, r, z, drift = t[::-1], r[::-1], z[::-1], drift[::-1]
+        z0, z1 = z[0], z[-1]
+    zs = np.linspace(z0, z1, n_rings)
+    rings = [((x + dx, y + dy, zz), rr) for (dx, dy), zz, rr in zip(drift, zs, r)]
+    return lathe(rng, rings)
+
+
+def place_speleothems(rng, field, origin, res, nodes, radii, segs, chamber, artifacts, density=1.0):
+    """Stalactites hang from the ceiling, stalagmites rise from the floor, columns join both.
+
+    Every spike leaves at least SPELEO_MIN_GAP of air to the opposite surface, so no
+    tunnel is sealed, but a drone has to thread between them."""
+    cands = []
+    for i, j in segs:
+        a, b = nodes[i], nodes[j]
+        ab = b - a
+        n = rng.poisson(SPELEO_PER_M * density * np.linalg.norm(ab))
+        side = np.array([-ab[1], ab[0], 0.0]) / (np.linalg.norm(ab[:2]) + 1e-9)
+        for _ in range(n):
+            t = rng.uniform()
+            r = (radii[i] if not chamber[i] else 2.6) * (1 - t) + (radii[j] if not chamber[j] else 2.6) * t
+            cands.append((a + t * ab + side * rng.uniform(-0.6, 0.6) * r, False))
+    for k in np.flatnonzero(chamber):
+        for _ in range(rng.poisson(SPELEO_PER_CHAMBER * density)):
+            ang, rr = rng.uniform(0, 2 * np.pi), radii[k] * np.sqrt(rng.uniform()) * 0.85
+            cands.append((nodes[k] + rr * np.array([np.cos(ang), np.sin(ang), 0.0]), True))
+
+    art_xy = np.array([a["pos"][:2] for a in artifacts]).reshape(-1, 2)
+    placed = []
+    for p, in_chamber in cands:
+        if np.linalg.norm(p) < SPELEO_KEEP_CLEAR or sample_field(field, origin, res, p)[0] > -0.4:
+            continue
+        if len(art_xy) and np.linalg.norm(art_xy - p[:2], axis=1).min() < 2.0:
+            continue
+        if any(np.linalg.norm(np.array(s["base"][:2]) - p[:2]) < 1.2 + s["radius"] for s in placed):
+            continue
+        ceil, floor = surface_above_below(field, origin, res, p)
+        if ceil is None or floor is None or ceil - floor < 1.6:
+            continue
+        gap = ceil - floor
+        around = [p + 1.6 * np.array([np.cos(a), np.sin(a), 0.0]) for a in np.arange(4) * np.pi / 2]
+        roomy = (sample_field(field, origin, res, np.array(around)) < -0.3).all()
+        u = rng.uniform()
+        if in_chamber and roomy and gap > 2.5 and u < 0.2:
+            s = {"kind": "column", "base": [p[0], p[1], floor], "floor": floor, "ceiling": ceil,
+                 "length": gap, "radius": rng.uniform(0.3, 0.65)}
+        else:
+            kind = "stalactite" if u < 0.6 else "stalagmite"
+            frac = rng.uniform(0.25, 0.65) if kind == "stalactite" else rng.uniform(0.2, 0.5)
+            length = min(frac * gap, gap - SPELEO_MIN_GAP, 4.5 if kind == "stalactite" else 3.0)
+            if length < 0.4:
+                continue
+            surf = ceil if kind == "stalactite" else floor
+            s = {"kind": kind, "base": [p[0], p[1], surf], "length": length,
+                 "radius": float(np.clip(length * rng.uniform(0.1, 0.18), 0.08, 0.5))}
+        placed.append(s)
+    meshes = [speleothem_mesh(rng, s) for s in placed]
+    info = [{"kind": s["kind"], "base": [round(float(v), 3) for v in s["base"]],
+             "length": round(float(s["length"]), 3), "radius": round(float(s["radius"]), 3)} for s in placed]
+    return (trimesh.util.concatenate(meshes) if meshes else None), info
+
+
+def generate(seed, size="medium", res=RESOLUTION, speleothems=1.0):
     preset = PRESETS[size]
     rng = np.random.default_rng(seed)
     nodes, radii, segs, chamber = grow_graph(rng, preset["n_segments"], preset["bounds"])
@@ -209,6 +335,9 @@ def generate(seed, size="medium", res=RESOLUTION):
     field[near] = np.minimum(field[near], -1.0)
     mesh = mesh_from_sdf(field, origin, res)
     artifacts = place_artifacts(rng, field, origin, res, nodes, segs, preset["n_artifacts"])
+    # Own random stream, so the tunnels and artifacts of a seed stay the same with or without spikes.
+    speleo, speleo_info = place_speleothems(np.random.default_rng([seed, 1]), field, origin, res,
+                                            nodes, radii, segs, chamber, artifacts, speleothems)
     meta = {
         "seed": seed,
         "size": size,
@@ -216,17 +345,25 @@ def generate(seed, size="medium", res=RESOLUTION):
         "bounds": list(preset["bounds"]),
         "base": [0.0, 0.0, 0.0],
         "graph": {"nodes": nodes.round(3).tolist(), "segments": [list(s) for s in segs]},
+        "speleothem_density": speleothems,
+        "speleothems": speleo_info,
     }
-    return mesh, meta, artifacts
+    return {"rock": mesh, "speleothems": speleo}, meta, artifacts
 
 
-def save(mesh, meta, artifacts, out_dir):
+def save(meshes, meta, artifacts, out_dir):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    parts = {k: m for k, m in meshes.items() if m is not None}
+    # PyBullet gets one concave body; the viewer gets the parts so it can shade them apart.
+    full = trimesh.util.concatenate(list(parts.values()))
     np.savez_compressed(out / "mesh.npz",
-                        vertices=mesh.vertices.astype(np.float32),
-                        faces=mesh.faces.astype(np.int32))
-    mesh.export(out / "cave.glb")
+                        vertices=full.vertices.astype(np.float32),
+                        faces=full.faces.astype(np.int32))
+    scene = trimesh.Scene()
+    for name, m in parts.items():
+        scene.add_geometry(m, geom_name=name, node_name=name)
+    scene.export(out / "cave.glb")
     (out / "map.json").write_text(json.dumps(meta, indent=1))
     # Ground truth for scoring. Agents never receive this file.
     (out / "truth.json").write_text(json.dumps({"artifacts": artifacts}, indent=1))
@@ -238,13 +375,17 @@ def main():
     ap.add_argument("--size", choices=PRESETS, default="medium")
     ap.add_argument("--name", default=None, help="output folder under maps/ (default: <size>_<seed>)")
     ap.add_argument("--res", type=float, default=RESOLUTION)
+    ap.add_argument("--speleothems", type=float, default=1.0,
+                    help="stalactite/stalagmite density multiplier, 0 = none")
     args = ap.parse_args()
     name = args.name or f"{args.size}_{args.seed}"
-    mesh, meta, artifacts = generate(args.seed, args.size, args.res)
+    meshes, meta, artifacts = generate(args.seed, args.size, args.res, args.speleothems)
     out = Path(__file__).resolve().parent.parent / "maps" / name
-    save(mesh, meta, artifacts, out)
-    print(f"{out}: {len(mesh.faces)} triangles, {len(meta['graph']['segments'])} tunnels, "
-          f"{len(artifacts)} artifacts")
+    save(meshes, meta, artifacts, out)
+    kinds = [s["kind"] for s in meta["speleothems"]]
+    print(f"{out}: {len(meshes['rock'].faces)} rock triangles, {len(meta['graph']['segments'])} tunnels, "
+          f"{len(artifacts)} artifacts, {kinds.count('stalactite')} stalactites, "
+          f"{kinds.count('stalagmite')} stalagmites, {kinds.count('column')} columns")
 
 
 if __name__ == "__main__":

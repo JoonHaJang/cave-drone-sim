@@ -147,6 +147,8 @@ def main():
                     help="LiDAR-inertial odometry quality; off = no pos/vel, build your own")
     ap.add_argument("--lidar", choices=["os0-32", "lite", "ideal"], default="os0-32",
                     help="os0-32 = Ouster OS0-32 spec (slow), lite = 16x256 beams (about 4x faster)")
+    ap.add_argument("--aero", choices=["off", "default", "hard"], default="default",
+                    help="gusts, wall turbulence, ceiling/ground effect near rock")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--speed", type=float, default=1.0, help="sim speed x real time, 0 = max")
     ap.add_argument("--headless", action="store_true")
@@ -160,7 +162,7 @@ def main():
     if not map_dir.exists():
         map_dir = ROOT / "maps" / args.map
     sim = Simulator(map_dir, args.drones, load_agent(args.agent), odom=args.odom, lidar=args.lidar,
-                    seed=args.seed)
+                    seed=args.seed, aero=args.aero)
     try:
         if args.headless:
             while sim.step():

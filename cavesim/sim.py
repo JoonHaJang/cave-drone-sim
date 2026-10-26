@@ -5,6 +5,10 @@ limited the way a real quadrotor's is (max tilt, max climb). The airframe attitu
 follows the thrust direction with a short lag, so body-fixed sensors tilt and the
 IMU sees realistic specific force and angular rate. That keeps the physics honest
 about inertia and collisions without making students tune attitude loops.
+
+Near rock the air is not still: gusts, wall turbulence and the ceiling/ground effect
+push the drone around (config.AeroParams). The autopilot only corrects them after
+the fact, so threading between stalactites needs clearance margin and slow speed.
 """
 import json
 import pickle
@@ -55,6 +59,9 @@ class Drone:
         self.last_true = np.array(pos, dtype=float)
         self.last_yaw = 0.0
         self.distance = 0.0
+        self.gust = np.zeros(3)         # unit-variance Gauss-Markov state of the air disturbance
+        self.aero_acc = np.zeros(3)     # last disturbance acceleration, for the viewer
+        self.clearance = np.inf         # m from the hull to the nearest rock (6 axis rays)
         self.trail = [list(np.round(pos, 2))]
         self.odom_trail = [list(np.round(pos, 2))]
         # Mailboxes
@@ -92,12 +99,14 @@ class Drone:
 
 class Simulator:
     def __init__(self, map_dir, n_drones, agent_factory, cfg: C.SimConfig = None,
-                 odom="default", lidar=None, seed=0):
+                 odom="default", lidar=None, seed=0, aero=None):
         self.cfg = cfg or C.SimConfig()
         if isinstance(odom, str):
             self.cfg.odom = C.ODOM_PRESETS[odom]
         if isinstance(lidar, str):
             self.cfg.lidar = C.LIDAR_PRESETS[lidar]
+        if isinstance(aero, str):
+            self.cfg.aero = C.AERO_PRESETS[aero]
         self.map_dir = Path(map_dir)
         self.meta = json.loads((self.map_dir / "map.json").read_text())
         self.artifacts = json.loads((self.map_dir / "truth.json").read_text())["artifacts"]
@@ -226,6 +235,36 @@ class Simulator:
         return [b if a == i else a for a, b in self.links if i in (a, b)]
 
     # ---------------------------------------------------------------- control
+    AXES = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]], dtype=float)
+
+    def aero_disturbance(self, dt):
+        """Gusts, wall turbulence, ceiling and ground effect for every flying drone (m/s^2)."""
+        ap, r = self.cfg.aero, self.cfg.drone.radius
+        live = [d for d in self.drones if d.active]
+        if not live:
+            return
+        reach = r + max(ap.wall_range, ap.ceiling_range, ap.ground_range)
+        starts, ends = [], []
+        for d in live:
+            pos = d.true_pos()
+            starts += [pos.tolist()] * 6
+            ends += (pos + self.AXES * reach).tolist()
+        hits = self.pb.rayTestBatch(starts, ends, collisionFilterMask=CAVE_GROUP)
+        phi = np.exp(-dt / ap.gust_tau)
+        for k, d in enumerate(live):
+            h = hits[6 * k: 6 * k + 6]
+            gap = np.array([x[2] * reach - r if x[0] == self.cave else np.inf for x in h])
+            d.clearance = max(float(gap.min()), 0.0)
+            near = np.clip(1 - d.clearance / ap.wall_range, 0, 1) if np.isfinite(d.clearance) else 0.0
+            d.gust = phi * d.gust + np.sqrt(1 - phi ** 2) * d.rng.normal(0, 1, 3)
+            acc = (ap.draft_std + ap.wall_turb_std * near ** 2) * d.gust
+            up, down = gap[4], gap[5]
+            if up < ap.ceiling_range:
+                acc[2] += ap.ceiling_gain * C.GRAVITY * (1 - max(up, 0) / ap.ceiling_range) ** 2
+            if down < ap.ground_range:
+                acc[2] += ap.ground_gain * C.GRAVITY * (1 - max(down, 0) / ap.ground_range) ** 2
+            d.aero_acc = acc
+
     def apply_thrust(self, d: Drone, dt):
         dp = self.cfg.drone
         v = d.true_vel()
@@ -252,7 +291,7 @@ class Simulator:
         d.thrust_dir += (want / np.linalg.norm(want) - d.thrust_dir) * min(1.0, dt / dp.attitude_tau)
         d.thrust_dir /= np.linalg.norm(d.thrust_dir)
         thrust = dp.mass * np.linalg.norm(want) / max(d.thrust_dir @ (want / np.linalg.norm(want)), 0.5)
-        f = thrust * d.thrust_dir + dp.linear_drag * v_cmd - dp.linear_drag * v
+        f = thrust * d.thrust_dir + dp.linear_drag * v_cmd - dp.linear_drag * v + dp.mass * d.aero_acc
         self.pb.applyExternalForce(d.body, -1, f.tolist(), d.true_pos().tolist(), p.WORLD_FRAME)
 
     def check_contacts(self, d: Drone, v_before):
@@ -324,6 +363,7 @@ class Simulator:
         for k in range(cfg.steps_per_tick):
             vels = [d.true_vel() for d in self.drones]
             prev_R = [d.R for d in self.drones]
+            self.aero_disturbance(dt)
             for d in self.drones:
                 if d.status == "flying":
                     rate = np.clip(d.cmd.yaw_rate, -cfg.drone.max_yaw_rate, cfg.drone.max_yaw_rate)
@@ -424,6 +464,9 @@ class Simulator:
                 "rp": [round(x, 3) for x in roll_pitch(d.R)],
                 "odom": np.round(d.odom_pos, 2).tolist() if d.odom_on else None,
                 "odom_yaw": round(d.odom_yaw, 3), "status": d.status, "battery": round(d.battery, 3),
+                "vel": np.round(d.true_vel(), 2).tolist(),
+                "clear": round(d.clearance, 2) if np.isfinite(d.clearance) else None,
+                "aero": np.round(d.aero_acc, 2).tolist(),
             }
             if lidar and d.active and d.last_scan is not None:
                 r, R, pos = d.last_scan
@@ -484,9 +527,9 @@ class Simulator:
 
 
 def run_mission(map_dir, agent_factory, n_drones=3, odom="default", lidar=None, seed=0, cfg=None,
-                verbose=False):
+                verbose=False, aero=None):
     """Headless run for experiments: returns the score dict."""
-    sim = Simulator(map_dir, n_drones, agent_factory, cfg=cfg, odom=odom, lidar=lidar, seed=seed)
+    sim = Simulator(map_dir, n_drones, agent_factory, cfg=cfg, odom=odom, lidar=lidar, seed=seed, aero=aero)
     try:
         while sim.step():
             if verbose and sim.tick % (10 * sim.cfg.agent_hz) == 0:

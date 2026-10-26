@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 results/
 *.out
+
+# Sketchfab Standard licence: keep the downloaded drone model out of the public repo
+bionic_dragonfly_four-axis_uav_aircraft/

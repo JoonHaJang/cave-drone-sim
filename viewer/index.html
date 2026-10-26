@@ -27,6 +27,17 @@
            background: rgba(16,20,26,.95); border: 1px solid #4a5868; border-radius: 8px; padding: 16px 20px; }
   #final pre { margin: 8px 0 0; }
   .muted { color: #8793a3; }
+  #fpvhud { display: none; position: absolute; pointer-events: none; overflow: hidden;
+            border: 1px solid #4a5868; border-radius: 4px; box-sizing: border-box;
+            font: 12px/1.35 ui-monospace, Consolas, monospace; color: #b8f5c8; text-shadow: 0 0 3px #000; }
+  #fpvhud .tl { position: absolute; top: 6px; left: 8px; }
+  #fpvhud .tr { position: absolute; top: 6px; right: 8px; text-align: right; }
+  #fpvhud .warn { color: #ff6b6b; font-weight: bold; }
+  #fpvCross { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+              border: 1px solid rgba(184,245,200,.7); border-radius: 50%; }
+  #fpvHorizonBox { position: absolute; left: 0; right: 0; top: 50%; height: 0; }
+  #fpvHorizon { position: absolute; left: 30%; right: 30%; top: 0; border-top: 1px dashed rgba(184,245,200,.6); }
+  #fpvAlert { position: absolute; top: 40%; width: 100%; text-align: center; font-size: 22px; color: #ff6b6b; }
 </style>
 </head>
 <body>
@@ -47,6 +58,13 @@
   </div>
 </div>
 <div id="status">연결 중...</div>
+<div id="fpvhud">
+  <div class="tl"><b id="fpvTitle">FPV</b><br>속도 <span id="fpvSpd">-</span><br>벽까지 <span id="fpvClr">-</span><br>교란 <span id="fpvGust">-</span></div>
+  <div class="tr"><span id="fpvAtt">-</span><br>배터리 <span id="fpvBat">-</span></div>
+  <div id="fpvCross"></div>
+  <div id="fpvHorizonBox"><div id="fpvHorizon"></div></div>
+  <div id="fpvAlert"></div>
+</div>
 <div id="controls">
   <button id="pause">일시정지</button>
   <select id="speed">
@@ -60,6 +78,8 @@
   <label><input type="checkbox" id="cLinks" checked> 통신</label>
   <label><input type="checkbox" id="cDebug" checked> 에이전트 디버그</label>
   <label><input type="checkbox" id="cFollow"> 선택 드론 따라가기</label>
+  <label><input type="checkbox" id="cFpv" checked> 1인칭(FPV)</label>
+  <button id="fpvBig">FPV 크게 (V)</button>
   <label>동굴 <input type="range" id="opacity" min="0" max="100" value="35" style="width:80px"></label>
 </div>
 <div id="final"><b>임무 종료</b><pre id="finalText"></pre></div>

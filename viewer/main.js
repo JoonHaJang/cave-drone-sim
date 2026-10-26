@@ -7,14 +7,24 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 const COLORS = [0xff6b6b, 0x4dabf7, 0x69db7c, 0xffd43b, 0xda77f2, 0xff922b, 0x38d9a9, 0xf783ac, 0xa9e34b];
 const $ = (id) => document.getElementById(id);
 
+// Drone model (glTF, y-up). Not part of the repo; without it the drones stay spheres.
+const DRONE_MODEL = "/bionic_dragonfly_four-axis_uav_aircraft/scene.gltf";
+const DRONE_SPAN = 0.5;          // m, rotor tip to rotor tip after scaling
+const MODEL_YAW = -Math.PI / 2;  // turns the model's nose onto body +x
+const FPV_OFFSET = new THREE.Vector3(0.14, 0, 0.03);   // camera position in the body frame
+
 // ---------------------------------------------------------------- scene
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;
 document.body.prepend(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0d1014);
+const SKY = new THREE.Color(0x0d1014);
+// Fog is always present so materials never recompile; the overview pushes it out of reach.
+scene.fog = new THREE.Fog(0x000000, 1e5, 1e5 + 1);
+
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 2000);
 camera.up.set(0, 0, 1);
 camera.position.set(-30, -60, 70);
@@ -22,27 +32,49 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(40, 0, 0);
 controls.update();
 
-scene.add(new THREE.HemisphereLight(0xcfd8e3, 0x302820, 1.4));
+// First-person camera, rigidly mounted on the selected drone. Camera looks down its -z,
+// so its basis in the body frame is right = -y, up = +z, back = -x.
+const fpvCam = new THREE.PerspectiveCamera(78, 16 / 9, 0.03, 120);
+const CAM_IN_BODY = new THREE.Quaternion().setFromRotationMatrix(
+  new THREE.Matrix4().makeBasis(new THREE.Vector3(0, -1, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(-1, 0, 0)));
+// Onboard LEDs: a wide flood plus a narrow spot, both bolted to the camera.
+const flood = new THREE.SpotLight(0xfff4e0, 0, 45, Math.PI / 3, 0.8, 1.6);
+const beam = new THREE.SpotLight(0xffffff, 0, 60, Math.PI / 9, 0.5, 1.4);
+for (const l of [flood, beam]) {
+  l.position.set(0, 0, 0);
+  l.target.position.set(0, 0, -1);
+  fpvCam.add(l, l.target);
+}
+scene.add(fpvCam);
+
+const hemi = new THREE.HemisphereLight(0xcfd8e3, 0x302820, 1.4);
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(30, -40, 80);
-scene.add(sun);
+scene.add(hemi, sun);
 
 addEventListener("resize", () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
 // ---------------------------------------------------------------- state
-let cave = null, caveMat = null;
+const caveMeshes = [];      // {mesh, over, fpv}: overview (see-through) and FPV (solid) materials
+const caveMats = [];        // see-through materials, driven by the opacity slider
 const artifactMeshes = {};
-const drones = [];          // per drone: {body, ghost, heading, lidar, trail, odomTrail, path, goal, pts}
+const drones = [];          // per drone: {anchor, marker, craft, ghost, lidar, trail, odomTrail, path, goal, pts, pose}
+const overlays = [];        // things the FPV view hides (trails, debug, links, ...)
 let linkLines = null;
 let selected = 0;
 let initMsg = null;
+let lastState = null;
 let ws = null;
+let droneModel = null;
+let stateDt = 100;          // ms between state messages, smoothed
+let lastStateAt = 0;
+let fpvBig = false;
 
 const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
+const EULER = new THREE.Euler(0, 0, 0, "ZYX");
+const quatOf = (yaw, rp) => new THREE.Quaternion().setFromEuler(EULER.set(rp ? rp[0] : 0, rp ? rp[1] : 0, yaw, "ZYX"));
 
 function makeLine(color, dashed = false, opacity = 1) {
   const mat = dashed
@@ -51,6 +83,7 @@ function makeLine(color, dashed = false, opacity = 1) {
   const line = new THREE.Line(new THREE.BufferGeometry(), mat);
   line.frustumCulled = false;
   scene.add(line);
+  overlays.push(line);
   return line;
 }
 
@@ -62,19 +95,62 @@ function setLine(line, pts) {
   if (line.material.isLineDashedMaterial) line.computeLineDistances();
 }
 
+function loadDroneModel() {
+  new GLTFLoader().load(DRONE_MODEL, (gltf) => {
+    const m = gltf.scene;
+    m.rotation.x = Math.PI / 2;                 // glTF y-up -> z-up
+    const wrap = new THREE.Group();
+    wrap.add(m);
+    wrap.rotation.z = MODEL_YAW;
+    const holder = new THREE.Group();
+    holder.add(wrap);
+    holder.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(holder);
+    const size = box.getSize(new THREE.Vector3());
+    const s = DRONE_SPAN / Math.max(size.x, size.y);
+    holder.scale.setScalar(s);
+    holder.position.copy(box.getCenter(new THREE.Vector3()).multiplyScalar(-s));
+    droneModel = holder;
+    drones.forEach(attachModel);
+  }, undefined, () => console.warn(`drone model not found at ${DRONE_MODEL}; drawing spheres`));
+}
+
+function attachModel(g) {
+  if (!droneModel || g.craft.children.length) return;
+  const m = droneModel.clone();
+  // Status LED in the drone's colour, so several drones stay apart up close.
+  const led = new THREE.Mesh(new THREE.SphereGeometry(0.025, 10, 8),
+                             new THREE.MeshBasicMaterial({ color: g.color }));
+  led.position.set(-0.12, 0, 0.06);
+  g.craft.add(m, led);
+}
+
 function onInit(msg) {
   initMsg = msg;
   $("mapname").textContent = msg.map;
   new GLTFLoader().load(`/maps/${msg.map}/cave.glb`, (gltf) => {
-    if (cave) scene.remove(cave);
-    cave = gltf.scene;
-    caveMat = new THREE.MeshStandardMaterial({
-      color: 0xc9b496, roughness: 0.9, side: THREE.DoubleSide,
-      transparent: true, opacity: $("opacity").value / 100, depthWrite: false,
+    for (const c of caveMeshes) scene.remove(c.mesh);
+    caveMeshes.length = caveMats.length = 0;
+    const box = new THREE.Box3();
+    gltf.scene.traverse((o) => {
+      if (!o.isMesh) return;
+      const spike = /speleo/i.test(o.name) || /speleo/i.test(o.parent?.name || "");
+      if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+      const over = new THREE.MeshStandardMaterial({
+        color: spike ? 0xe8dcc4 : 0xc9b496, roughness: 0.9, side: THREE.DoubleSide, fog: false,
+        transparent: true, opacity: $("opacity").value / 100, depthWrite: false,
+      });
+      const fpv = new THREE.MeshStandardMaterial({
+        color: spike ? 0xd9ccb2 : 0x8f7e69, roughness: spike ? 0.55 : 0.95, metalness: 0,
+        side: THREE.DoubleSide,
+      });
+      o.material = over;
+      caveMats.push(over);
+      caveMeshes.push({ mesh: o, over, fpv });
+      box.expandByObject(o);
     });
-    cave.traverse((o) => { if (o.isMesh) o.material = caveMat; });
-    scene.add(cave);
-    const box = new THREE.Box3().setFromObject(cave);
+    scene.add(gltf.scene);
+    caveMeshes.forEach((c) => (c.root = gltf.scene));
     const c = box.getCenter(new THREE.Vector3());
     controls.target.copy(c);
     camera.position.set(c.x - 0.4 * (box.max.x - box.min.x), c.y - 0.9 * (box.max.y - box.min.y), c.z + 70);
@@ -91,6 +167,7 @@ function onInit(msg) {
                               new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.5 }));
   ring.position.copy(v3(msg.base)).add(new THREE.Vector3(0, 0, -2.5));
   scene.add(ring);
+  overlays.push(ring);
 
   for (const a of msg.artifacts) {
     const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.45),
@@ -103,13 +180,17 @@ function onInit(msg) {
 
   for (let i = 0; i < msg.n_drones; i++) {
     const color = COLORS[i % COLORS.length];
-    const body = new THREE.Mesh(new THREE.SphereGeometry(0.35, 20, 14),
-                                new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.4 }));
+    const anchor = new THREE.Group();          // true pose; the model and the marker hang off it
+    const craft = new THREE.Group();
+    // Far away the 0.5 m model is invisible, so a coloured marker with a heading cone takes over.
+    const marker = new THREE.Mesh(new THREE.SphereGeometry(0.35, 20, 14),
+                                  new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.4 }));
     const heading = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.7, 10),
                                    new THREE.MeshBasicMaterial({ color }));
     heading.geometry.rotateZ(-Math.PI / 2);
     heading.geometry.translate(0.6, 0, 0);
-    body.add(heading);
+    marker.add(heading);
+    anchor.add(craft, marker);
     const ghost = new THREE.Mesh(new THREE.SphereGeometry(0.35, 12, 8),
                                  new THREE.MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: 0.6 }));
     const lidar = new THREE.Points(new THREE.BufferGeometry(),
@@ -119,15 +200,19 @@ function onInit(msg) {
                                  new THREE.PointsMaterial({ color: 0xffffff, size: 0.5 }));
     pts.frustumCulled = false;
     const goal = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-    scene.add(body, ghost, lidar, pts, goal);
-    drones.push({ body, ghost, lidar, pts, goal, color,
-                  trail: makeLine(color, false, 0.9), odomTrail: makeLine(color, true, 0.6),
-                  path: makeLine(0xffffff, false, 0.5) });
+    scene.add(anchor, ghost, lidar, pts, goal);
+    overlays.push(ghost, lidar, pts, goal);
+    const g = { anchor, craft, marker, ghost, lidar, pts, goal, color, pose: null,
+                trail: makeLine(color, false, 0.9), odomTrail: makeLine(color, true, 0.6),
+                path: makeLine(0xffffff, false, 0.5) };
+    drones.push(g);
+    attachModel(g);
   }
   linkLines = new THREE.LineSegments(new THREE.BufferGeometry(),
                                      new THREE.LineBasicMaterial({ color: 0x51cf66, transparent: true, opacity: 0.7 }));
   linkLines.frustumCulled = false;
   scene.add(linkLines);
+  overlays.push(linkLines);
   buildDroneHud(msg.n_drones);
 }
 
@@ -149,6 +234,10 @@ const STATUS_KO = { flying: "비행", landing: "착륙 중", landed: "착륙", c
 
 function onState(msg) {
   if (!initMsg) return;
+  const now = performance.now();
+  if (lastStateAt) stateDt += (Math.min(Math.max(now - lastStateAt, 20), 500) - stateDt) * 0.2;
+  lastStateAt = now;
+  lastState = msg;
   $("time").textContent = `${msg.t.toFixed(1)} / ${initMsg.mission_time_s} s`;
   $("score").textContent = msg.score.score;
   $("arts").textContent = `${msg.score.artifacts_found} / ${msg.score.artifacts_total}`;
@@ -157,11 +246,11 @@ function onState(msg) {
   const show = (id) => $(id).checked;
   msg.drones.forEach((d, i) => {
     const g = drones[i];
-    g.body.position.copy(v3(d.pos));
-    g.body.rotation.set(0, 0, 0);
-    g.body.rotateZ(d.yaw);
-    if (d.rp) { g.body.rotateY(d.rp[1]); g.body.rotateX(d.rp[0]); }
-    g.body.material.emissiveIntensity = d.status === "crashed" || d.status === "dead" ? 0 : 0.4;
+    // Interpolate from wherever the drone is drawn now to the new pose over one message interval.
+    const target = { pos: v3(d.pos), q: quatOf(d.yaw, d.rp) };
+    g.pose = g.pose ? { from: { pos: g.anchor.position.clone(), q: g.anchor.quaternion.clone() }, to: target, t0: now }
+                    : { from: target, to: target, t0: now };
+    g.marker.material.emissiveIntensity = d.status === "crashed" || d.status === "dead" ? 0 : 0.4;
     if (d.odom) g.ghost.position.copy(v3(d.odom));
     g.ghost.visible = show("cOdom") && !!d.odom;
     if (d.lidar && show("cLidar")) {
@@ -203,13 +292,7 @@ function onState(msg) {
     m.material.color.setHex(found ? 0x51cf66 : 0x868e96);
     m.visible = found || show("cTruth");
   }
-
-  if (show("cFollow") && msg.drones[selected]) {
-    const p = v3(msg.drones[selected].pos);
-    const delta = p.clone().sub(controls.target);
-    controls.target.add(delta);
-    camera.position.add(delta);
-  }
+  updateFpvHud();
 }
 
 function onTrails(msg) {
@@ -221,6 +304,92 @@ function onTrails(msg) {
 function onDone(msg) {
   $("final").style.display = "block";
   $("finalText").textContent = JSON.stringify(msg.score, null, 1);
+}
+
+// ---------------------------------------------------------------- FPV
+const fpvOn = () => $("cFpv").checked && drones[selected];
+
+function updateFpvHud() {
+  const d = lastState && lastState.drones[selected];
+  $("fpvhud").style.display = fpvOn() ? "block" : "none";
+  if (!d) return;
+  const speed = Math.hypot(...(d.vel || [0, 0, 0]));
+  const gust = Math.hypot(...(d.aero || [0, 0, 0]));
+  $("fpvTitle").textContent = `FPV · 드론 ${selected}`;
+  $("fpvSpd").textContent = `${speed.toFixed(2)} m/s`;
+  $("fpvClr").textContent = d.clear == null ? "> 1.4 m" : `${d.clear.toFixed(2)} m`;
+  $("fpvClr").className = d.clear != null && d.clear < 0.4 ? "warn" : "";
+  $("fpvGust").textContent = `${gust.toFixed(2)} m/s²`;
+  $("fpvAtt").textContent = `R ${(d.rp[0] * 57.3).toFixed(0)}° P ${(d.rp[1] * 57.3).toFixed(0)}°`;
+  $("fpvBat").textContent = `${(100 * d.battery).toFixed(0)} %`;
+  const dead = d.status === "crashed" || d.status === "dead";
+  $("fpvAlert").textContent = dead ? (STATUS_KO[d.status] || d.status) : "";
+}
+
+function fpvRect() {
+  // Inset in the top-right corner, or the whole window when enlarged.
+  if (fpvBig) return { x: 0, y: 0, w: innerWidth, h: innerHeight };
+  const w = Math.min(560, Math.round(innerWidth * 0.38)), h = Math.round(w * 9 / 16);
+  return { x: innerWidth - w - 10, y: 44, w, h };
+}
+
+function renderOverview(r) {
+  camera.aspect = r.w / r.h;
+  camera.updateProjectionMatrix();
+  scene.background = SKY;
+  renderer.setViewport(r.x, innerHeight - r.y - r.h, r.w, r.h);
+  renderer.setScissor(r.x, innerHeight - r.y - r.h, r.w, r.h);
+  renderer.clear();
+  renderer.render(scene, camera);
+}
+
+function renderFpv(r) {
+  const g = drones[selected];
+  fpvCam.position.copy(FPV_OFFSET).applyQuaternion(g.anchor.quaternion).add(g.anchor.position);
+  fpvCam.quaternion.copy(g.anchor.quaternion).multiply(CAM_IN_BODY);
+  fpvCam.aspect = r.w / r.h;
+  fpvCam.updateProjectionMatrix();
+
+  // Swap the scene into "camera" mode: solid rock, darkness, onboard lights, no overlays.
+  const hidden = overlays.map((o) => o.visible);
+  overlays.forEach((o) => (o.visible = false));
+  const ownVis = g.anchor.visible;
+  g.anchor.visible = false;
+  for (const c of caveMeshes) c.mesh.material = c.fpv;
+  const hemiI = hemi.intensity, sunI = sun.intensity;
+  hemi.intensity = 0.05;
+  sun.intensity = 0;
+  flood.intensity = 70;
+  beam.intensity = 120;
+  scene.fog.near = 6;
+  scene.fog.far = 45;
+  scene.background = null;
+
+  renderer.setViewport(r.x, innerHeight - r.y - r.h, r.w, r.h);
+  renderer.setScissor(r.x, innerHeight - r.y - r.h, r.w, r.h);
+  renderer.setClearColor(0x000000, 1);
+  renderer.clear();
+  renderer.render(scene, fpvCam);
+
+  overlays.forEach((o, k) => (o.visible = hidden[k]));
+  g.anchor.visible = ownVis;
+  for (const c of caveMeshes) c.mesh.material = c.over;
+  hemi.intensity = hemiI;
+  sun.intensity = sunI;
+  flood.intensity = beam.intensity = 0;
+  scene.fog.near = 1e5;
+  scene.fog.far = 1e5 + 1;
+}
+
+function placeFpvHud(r) {
+  const el = $("fpvhud");
+  Object.assign(el.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
+  const d = lastState && lastState.drones[selected];
+  if (d) {
+    // Artificial horizon: tilts with roll, slides with pitch (vertical FOV maps to the inset height).
+    const px = (d.rp[1] / THREE.MathUtils.degToRad(fpvCam.fov)) * r.h;
+    $("fpvHorizon").style.transform = `translateY(${px}px) rotate(${-d.rp[0]}rad)`;
+  }
 }
 
 // ---------------------------------------------------------------- socket
@@ -237,6 +406,7 @@ function connect() {
     else if (msg.type === "done") onDone(msg);
   };
 }
+loadDroneModel();
 connect();
 
 let paused = false;
@@ -246,8 +416,17 @@ $("pause").onclick = () => {
   $("pause").textContent = paused ? "재개" : "일시정지";
 };
 $("speed").onchange = (e) => ws.send(JSON.stringify({ cmd: "speed", value: Number(e.target.value) }));
-$("opacity").oninput = (e) => { if (caveMat) { caveMat.opacity = e.target.value / 100; caveMat.depthWrite = e.target.value > 90; } };
+$("opacity").oninput = (e) => caveMats.forEach((m) => { m.opacity = e.target.value / 100; m.depthWrite = e.target.value > 90; });
 $("final").onclick = () => { $("final").style.display = "none"; };
+$("cFpv").onchange = updateFpvHud;
+const toggleBig = () => { fpvBig = !fpvBig; $("fpvBig").textContent = fpvBig ? "FPV 작게 (V)" : "FPV 크게 (V)"; };
+$("fpvBig").onclick = toggleBig;
+addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.key === "v" || e.key === "V") toggleBig();
+  const n = Number(e.key);
+  if (n >= 1 && n <= drones.length) $("drones").children[n - 1].click();
+});
 
 // One separate window per sensor, for the drone selected in the HUD.
 const SENSOR_WIN = { lidar: [960, 820], imu: [900, 560], alt: [900, 560], odom: [1000, 480], status: [760, 420] };
@@ -260,7 +439,31 @@ document.querySelectorAll("[data-sensor]").forEach((b) => {
   };
 });
 
+renderer.setScissorTest(true);
 renderer.setAnimationLoop(() => {
+  const now = performance.now();
+  for (const g of drones) {
+    if (!g.pose) continue;
+    const a = Math.min((now - g.pose.t0) / stateDt, 1);
+    g.anchor.position.lerpVectors(g.pose.from.pos, g.pose.to.pos, a);
+    g.anchor.quaternion.slerpQuaternions(g.pose.from.q, g.pose.to.q, a);
+    const far = camera.position.distanceTo(g.anchor.position) > 7 || !g.craft.children.length;
+    g.marker.visible = far;
+  }
+  if ($("cFollow").checked && drones[selected]) {
+    const delta = drones[selected].anchor.position.clone().sub(controls.target);
+    controls.target.add(delta);
+    camera.position.add(delta);
+  }
   controls.update();
-  renderer.render(scene, camera);
+
+  const full = { x: 0, y: 0, w: innerWidth, h: innerHeight };
+  const fpv = fpvOn();
+  if (fpv && fpvBig) {
+    renderFpv(full);
+  } else {
+    renderOverview(full);
+    if (fpv) renderFpv(fpvRect());
+  }
+  if (fpv) placeFpvHud(fpvBig ? full : fpvRect());
 });
