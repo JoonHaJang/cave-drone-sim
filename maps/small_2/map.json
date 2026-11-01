@@ -187,5 +187,568 @@
     18
    ]
   ]
- }
+ },
+ "speleothem_density": 1.0,
+ "speleothems": [
+  {
+   "kind": "stalagmite",
+   "base": [
+    11.044,
+    3.991,
+    -3.609
+   ],
+   "length": 1.365,
+   "radius": 0.241
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    9.798,
+    -0.42,
+    1.894
+   ],
+   "length": 1.243,
+   "radius": 0.189
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    8.602,
+    -2.139,
+    -3.755
+   ],
+   "length": 1.724,
+   "radius": 0.229
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    10.767,
+    7.493,
+    1.456
+   ],
+   "length": 2.164,
+   "radius": 0.344
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    9.219,
+    -4.989,
+    -2.32
+   ],
+   "length": 1.224,
+   "radius": 0.147
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    15.312,
+    -7.356,
+    2.859
+   ],
+   "length": 2.463,
+   "radius": 0.338
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    13.842,
+    -4.647,
+    1.544
+   ],
+   "length": 1.614,
+   "radius": 0.262
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    10.411,
+    18.619,
+    5.359
+   ],
+   "length": 2.115,
+   "radius": 0.288
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    12.158,
+    9.243,
+    2.509
+   ],
+   "length": 1.332,
+   "radius": 0.169
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    10.568,
+    16.066,
+    -0.986
+   ],
+   "length": 2.372,
+   "radius": 0.324
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    16.95,
+    25.104,
+    5.152
+   ],
+   "length": 3.072,
+   "radius": 0.5
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    11.557,
+    20.412,
+    5.784
+   ],
+   "length": 1.747,
+   "radius": 0.197
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    28.571,
+    12.863,
+    1.042
+   ],
+   "length": 1.365,
+   "radius": 0.2
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    30.942,
+    9.429,
+    6.297
+   ],
+   "length": 2.522,
+   "radius": 0.422
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    34.401,
+    9.417,
+    1.771
+   ],
+   "length": 1.783,
+   "radius": 0.233
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    42.291,
+    8.914,
+    2.441
+   ],
+   "length": 1.204,
+   "radius": 0.151
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    42.18,
+    3.782,
+    6.122
+   ],
+   "length": 1.601,
+   "radius": 0.194
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    46.074,
+    10.736,
+    1.347
+   ],
+   "length": 1.659,
+   "radius": 0.212
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    43.385,
+    8.074,
+    2.497
+   ],
+   "length": 2.33,
+   "radius": 0.332
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    43.391,
+    12.053,
+    1.568
+   ],
+   "length": 2.229,
+   "radius": 0.328
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    45.495,
+    13.133,
+    1.327
+   ],
+   "length": 2.546,
+   "radius": 0.268
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    44.428,
+    6.78,
+    2.56
+   ],
+   "length": 1.773,
+   "radius": 0.23
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    23.849,
+    -4.235,
+    0.562
+   ],
+   "length": 1.194,
+   "radius": 0.179
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    20.547,
+    -7.203,
+    -3.197
+   ],
+   "length": 1.298,
+   "radius": 0.194
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    35.847,
+    -6.965,
+    1.803
+   ],
+   "length": 1.364,
+   "radius": 0.225
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    32.149,
+    -10.272,
+    1.493
+   ],
+   "length": 0.844,
+   "radius": 0.12
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    24.784,
+    -11.157,
+    5.262
+   ],
+   "length": 2.817,
+   "radius": 0.418
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    22.87,
+    -12.302,
+    0.156
+   ],
+   "length": 2.347,
+   "radius": 0.341
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    32.744,
+    -7.78,
+    4.944
+   ],
+   "length": 1.122,
+   "radius": 0.194
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    22.996,
+    -19.198,
+    5.063
+   ],
+   "length": 1.471,
+   "radius": 0.19
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    22.8,
+    -14.474,
+    5.498
+   ],
+   "length": 1.731,
+   "radius": 0.246
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    10.035,
+    25.817,
+    4.971
+   ],
+   "length": 2.288,
+   "radius": 0.406
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    10.313,
+    23.785,
+    4.763
+   ],
+   "length": 1.026,
+   "radius": 0.18
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    6.638,
+    27.438,
+    -0.8
+   ],
+   "length": 1.774,
+   "radius": 0.268
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    7.953,
+    26.751,
+    5.743
+   ],
+   "length": 3.238,
+   "radius": 0.5
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    23.144,
+    -22.381,
+    3.77
+   ],
+   "length": 2.221,
+   "radius": 0.243
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    28.781,
+    -21.059,
+    2.058
+   ],
+   "length": 2.581,
+   "radius": 0.459
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    30.492,
+    -19.943,
+    1.348
+   ],
+   "length": 3.301,
+   "radius": 0.361
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    24.506,
+    -22.935,
+    3.441
+   ],
+   "length": 3.061,
+   "radius": 0.379
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    34.964,
+    -13.449,
+    -7.329
+   ],
+   "length": 1.725,
+   "radius": 0.176
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    33.088,
+    -5.079,
+    -2.445
+   ],
+   "length": 2.342,
+   "radius": 0.276
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    34.018,
+    -2.741,
+    -7.462
+   ],
+   "length": 1.381,
+   "radius": 0.172
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    9.803,
+    21.604,
+    0.636
+   ],
+   "length": 2.392,
+   "radius": 0.307
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    8.477,
+    16.623,
+    5.022
+   ],
+   "length": 1.946,
+   "radius": 0.331
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    6.784,
+    20.497,
+    4.564
+   ],
+   "length": 2.049,
+   "radius": 0.256
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    8.891,
+    18.185,
+    0.371
+   ],
+   "length": 2.36,
+   "radius": 0.392
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    9.097,
+    30.883,
+    4.923
+   ],
+   "length": 3.295,
+   "radius": 0.5
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    5.232,
+    29.253,
+    -0.23
+   ],
+   "length": 2.207,
+   "radius": 0.359
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    10.821,
+    30.853,
+    4.778
+   ],
+   "length": 2.358,
+   "radius": 0.248
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    7.785,
+    28.675,
+    -1.269
+   ],
+   "length": 2.74,
+   "radius": 0.343
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    7.029,
+    24.749,
+    4.699
+   ],
+   "length": 2.893,
+   "radius": 0.296
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    33.583,
+    -12.894,
+    -2.156
+   ],
+   "length": 1.436,
+   "radius": 0.217
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    35.592,
+    -10.359,
+    -2.426
+   ],
+   "length": 1.831,
+   "radius": 0.317
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    35.756,
+    -15.468,
+    -2.015
+   ],
+   "length": 2.193,
+   "radius": 0.325
+  },
+  {
+   "kind": "stalagmite",
+   "base": [
+    31.821,
+    -13.985,
+    -6.718
+   ],
+   "length": 1.231,
+   "radius": 0.198
+  },
+  {
+   "kind": "stalactite",
+   "base": [
+    33.013,
+    -15.148,
+    -0.848
+   ],
+   "length": 1.745,
+   "radius": 0.258
+  }
+ ]
 }

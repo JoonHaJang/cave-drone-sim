@@ -6,7 +6,7 @@ Everything you receive and may send is defined in cavesim/api.py.
 """
 import numpy as np
 
-from cavesim.api import Agent, Command
+from cavesim.api import Agent, Command, body_to_odom  # noqa: F401
 
 
 class TeamAgent(Agent):
@@ -17,7 +17,8 @@ class TeamAgent(Agent):
 
     def step(self, obs):
         # 1. Localisation: obs.pos / obs.yaw drift over time. Correct them if you can.
-        # 2. Mapping: obs.lidar is (N, 3) in the body frame. Rotate by obs.yaw, add obs.pos.
+        # 2. Mapping: obs.lidar is (N, 3) in the tilting body frame; body_to_odom(obs, obs.lidar)
+        #    puts it in the odom frame. Raw IMU samples are in obs.imu.
         # 3. Cooperation: read obs.inbox, share map/frontier/assignment with Command.send.
         # 4. Decide: explore a frontier, relay, or go home before the battery runs out.
         # 5. Report artifacts in obs.detections once obs.base_link is True.

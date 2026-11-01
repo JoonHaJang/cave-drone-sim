@@ -102,6 +102,18 @@
   .toggle:has(input:checked)::before { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
   input[type=range] { accent-color: var(--accent); width: 90px; }
 
+  #sensors { flex-wrap: wrap; }
+  #sensors button { padding: 4px 7px; }
+
+  /* ---------------------------------------------------------- FPV / chase telemetry */
+  #tele { display: none; top: 14px; left: 50%; transform: translateX(-50%); padding: 8px 14px; gap: 18px; }
+  body.inside #tele { display: flex; }
+  #tele span { display: flex; flex-direction: column; align-items: center; white-space: nowrap; }
+  @media (max-width: 1100px) { #tele { left: auto; right: 14px; top: 50%; transform: translateY(-50%); flex-direction: column; gap: 8px; } }
+  #tele label { font-size: 9.5px; letter-spacing: .12em; color: var(--muted); }
+  #tele b { font-family: var(--mono); font-size: 14px; }
+  #tele b.warn { color: var(--bad); text-shadow: 0 0 10px var(--bad); }
+
   /* ---------------------------------------------------------- 3D labels */
   .tag { font: 700 10px/1 var(--mono); padding: 3px 6px; border-radius: 6px; color: #fff; white-space: nowrap;
          background: rgba(8, 12, 18, .72); border: 1px solid var(--c, #fff); transform: translateY(-14px); }
@@ -146,7 +158,20 @@
   </div>
   <div class="section">DRONES</div>
   <div id="drones"></div>
+  <div class="section">SENSOR WINDOWS · SELECTED DRONE</div>
+  <div class="seg" id="sensors">
+    <button data-v="lidar">LiDAR</button><button data-v="imu">IMU</button><button data-v="alt">Altitude</button>
+    <button data-v="odom">Odometry</button><button data-v="status">Status</button>
+  </div>
   <div class="hint"><kbd>1</kbd>–<kbd>9</kbd> select drone · <kbd>C</kbd> camera · <kbd>Space</kbd> pause · <kbd>H</kbd> hide UI</div>
+</div>
+
+<div id="tele" class="panel">
+  <span><label>SPEED</label><b id="tSpd">-</b></span>
+  <span><label>WALL</label><b id="tClr">-</b></span>
+  <span><label>GUST</label><b id="tGust">-</b></span>
+  <span><label>ROLL · PITCH</label><b id="tAtt">-</b></span>
+  <span><label>BATTERY</label><b id="tBat">-</b></span>
 </div>
 
 <div id="log" class="panel">
@@ -159,7 +184,7 @@
     <button id="pause">Pause</button>
     <div class="group"><span>SPEED</span>
       <div class="seg" id="speed">
-        <button data-v="0.5">0.5x</button><button data-v="1">1x</button><button data-v="2" class="on">2x</button>
+        <button data-v="0.5">0.5x</button><button data-v="1" class="on">1x</button><button data-v="2">2x</button>
         <button data-v="5">5x</button><button data-v="0">Max</button>
       </div>
     </div>

@@ -343,6 +343,7 @@ function makeDrone(i) {
   const root = new THREE.Group(), tilt = new THREE.Group(), model = new THREE.Group();
   root.add(tilt);
   tilt.add(model);
+  tilt.rotation.order = "YXZ";            // root carries yaw, so root * tilt = Rz(yaw) Ry(pitch) Rx(roll)
   model.scale.setScalar(DRONE_SCALE);
   const led = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 3 });
 
@@ -406,7 +407,7 @@ function makeDrone(i) {
     trail: makeLine2(0xffffff, { width: 2.5, vertexColors: true, opacity: 0.95 }),
     odomTrail: makeLine2(color, { width: 1.2, dashed: true, opacity: 0.55 }),
     path: makeLine2(0xffffff, { width: 1.5, opacity: 0.6 }),
-    target: new THREE.Vector3(), odom: new THREE.Vector3(), vel: new THREE.Vector3(),
+    target: new THREE.Vector3(), odom: new THREE.Vector3(), hasOdom: true, rp: [0, 0],
     yaw: 0, targetYaw: 0, lastT: null, status: "flying", alive: true, battery: 1, lowWarned: false,
     hasTrail: false,
   };
@@ -544,6 +545,7 @@ function select(i) {
   selected = i;
   Object.values(ui).forEach((u, k) => u.el.classList.toggle("sel", k === i));
   selRing.material.color.setHex(drones[i].color);
+  updateTele();
 }
 
 // ---------------------------------------------------------------- messages
@@ -606,17 +608,17 @@ function onState(msg) {
   msg.drones.forEach((d, i) => {
     const g = drones[i];
     const p = v3(d.pos);
+    g.hasOdom = !!d.odom;                // null with --odom off
+    if (g.hasOdom) g.odom.copy(v3(d.odom));
     if (g.lastT === null) {
       g.root.position.copy(p);
       g.yaw = d.yaw;
-      g.ghost.position.copy(v3(d.odom));
-    } else if (msg.t > g.lastT) {
-      g.vel.copy(p).sub(g.target).divideScalar(msg.t - g.lastT);
+      g.ghost.position.copy(g.odom);
     }
     g.lastT = msg.t;
     g.target.copy(p);
     g.targetYaw = d.yaw;
-    g.odom.copy(v3(d.odom));
+    g.rp = d.rp || [0, 0];
     g.battery = d.battery;
 
     if (d.status !== g.status) {
@@ -647,7 +649,7 @@ function onState(msg) {
     const dbg = d.debug || {};
     const dv = on("cDebug");
     const hasPath = !!(dbg.path && dbg.path.length);
-    if (hasPath) setLine2(g.path, [d.odom, ...dbg.path.slice().reverse()].flat());
+    if (hasPath) setLine2(g.path, [d.odom || d.pos, ...dbg.path.slice().reverse()].flat());
     g.path.visible = dv && hasPath;
     g.goal.visible = dv && !!dbg.goal;
     if (dbg.goal) g.goal.position.copy(v3(dbg.goal));
@@ -660,7 +662,9 @@ function onState(msg) {
     u.st.className = `chip st ${d.status}`;
     u.link.classList.toggle("on", msg.base_links.includes(i));
     u.mode.textContent = dbg.mode ? `mode · ${dbg.mode}` : "";
-    u.drift.textContent = `drift ${Math.hypot(d.pos[0] - d.odom[0], d.pos[1] - d.odom[1], d.pos[2] - d.odom[2]).toFixed(2)} m`;
+    u.drift.textContent = d.odom
+      ? `drift ${Math.hypot(d.pos[0] - d.odom[0], d.pos[1] - d.odom[1], d.pos[2] - d.odom[2]).toFixed(2)} m`
+      : "odometry off";
     u.batt.style.width = `${100 * d.battery}%`;
     u.batt.style.background = d.battery > 0.4 ? "var(--good)" : d.battery > 0.2 ? "var(--warn)" : "var(--bad)";
     u.pct.textContent = `${Math.round(100 * d.battery)}%`;
@@ -672,6 +676,19 @@ function onState(msg) {
     markFound(id, seeded);
   }
   seeded = true;
+  updateTele();
+}
+
+function updateTele() {
+  const d = lastState && lastState.drones[selected];
+  if (!d) return;
+  $("tSpd").textContent = `${Math.hypot(...(d.vel || [0, 0, 0])).toFixed(2)} m/s`;
+  $("tClr").textContent = d.clear == null ? "> 1.4 m" : `${d.clear.toFixed(2)} m`;
+  $("tClr").classList.toggle("warn", d.clear != null && d.clear < 0.4);
+  $("tGust").textContent = `${Math.hypot(...(d.aero || [0, 0, 0])).toFixed(2)} m/s²`;
+  const rp = d.rp || [0, 0];
+  $("tAtt").textContent = `${(rp[0] * 57.3).toFixed(0)}° · ${(rp[1] * 57.3).toFixed(0)}°`;
+  $("tBat").textContent = `${Math.round(100 * d.battery)}%`;
 }
 
 function onTrails(msg) {
@@ -746,6 +763,7 @@ function setCamMode(mode) {
   }
   camMode = mode;
   intro = null;
+  document.body.classList.toggle("inside", inside(mode));
   segSelect("cam", mode);
   controls.enabled = !inside(mode);
   scene.fog.density = inside(mode) ? FOG.inside : FOG.outside;
@@ -776,14 +794,12 @@ function updateDrones(dt, t) {
     g.yaw += wrap(g.targetYaw - g.yaw) * k;
     g.root.rotation.z = g.yaw;
     if (g.alive) {
-      const c = Math.cos(g.yaw), s = Math.sin(g.yaw);
-      const fwd = c * g.vel.x + s * g.vel.y, side = -s * g.vel.x + c * g.vel.y;
-      g.tilt.rotation.y += (THREE.MathUtils.clamp(fwd * 0.1, -0.35, 0.35) - g.tilt.rotation.y) * damp(dt, 5);
-      g.tilt.rotation.x += (THREE.MathUtils.clamp(-side * 0.1, -0.35, 0.35) - g.tilt.rotation.x) * damp(dt, 5);
+      g.tilt.rotation.x += (g.rp[0] - g.tilt.rotation.x) * k;
+      g.tilt.rotation.y += (g.rp[1] - g.tilt.rotation.y) * k;
       g.rotors.forEach((r) => { r.blade.rotation.z += r.dir * dt * 38; });
       if (g.battery < 0.2) g.led.emissiveIntensity = Math.sin(t * 9) > 0 ? 3 : 0.3;
     }
-    const odomOn = on("cOdom");
+    const odomOn = on("cOdom") && g.hasOdom;
     g.ghost.position.lerp(g.odom, k);
     g.ghost.visible = g.errLine.visible = odomOn && !inside;
     if (odomOn) {
@@ -903,7 +919,7 @@ function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.st
 function connect() {
   const port = new URLSearchParams(location.search).get("ws") || "8765";
   ws = new WebSocket(`ws://${location.hostname}:${port}`);
-  ws.onopen = () => { $("status").textContent = "connected"; $("status").className = "conn on"; };
+  ws.onopen = () => { $("status").textContent = "connected"; $("status").className = "conn on"; send({ cmd: "viewer" }); };
   ws.onclose = () => { $("status").textContent = "disconnected"; $("status").className = "conn off"; };
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
@@ -931,6 +947,12 @@ seg("speed", (v) => { send({ cmd: "speed", value: Number(v) }); segSelect("speed
 seg("cam", setCamMode);
 seg("caveStyle", (v) => setCaveStyle(v));
 $("opacity").oninput = applyCave;
+// One window per sensor, for the drone selected in the HUD (viewer/sensors.html).
+const SENSOR_WIN = { lidar: [960, 820], imu: [900, 560], alt: [900, 560], odom: [1000, 480], status: [760, 420] };
+seg("sensors", (kind) => {
+  const [w, h] = SENSOR_WIN[kind], port = new URLSearchParams(location.search).get("ws") || "8765";
+  window.open(`sensors.html?sensor=${kind}&drone=${selected}&ws=${port}`, `sensor_${kind}_${selected}`, `width=${w},height=${h}`);
+});
 document.querySelectorAll("#dock input[type=checkbox]").forEach((c) => c.addEventListener("change", applyToggles));
 $("final").onclick = () => { $("final").style.display = "none"; };
 controls.addEventListener("start", () => { intro = null; });
