@@ -27,7 +27,9 @@ def wrap(a):
 class ExplorerAgent(Agent):
     def __init__(self, drone_id, n_drones, info):
         super().__init__(drone_id, n_drones, info)
-        self.mode = "explore"
+        # SubT worlds start outside the cave mouth: fly to the entrance first, then explore.
+        self.entrance = None if info.get("entrance") is None else np.array(info["entrance"], dtype=float)
+        self.mode = "explore" if self.entrance is None else "enter"
         self.crumbs = []          # loop-erased path from base to here, odom frame
         self.visited = set()
         self.heading = 2 * np.pi * drone_id / n_drones   # fan out at the start
@@ -103,6 +105,17 @@ class ExplorerAgent(Agent):
         self.goal = obs.pos + 4 * v / max(speed, 1e-6)
         return v
 
+    def enter(self, obs):
+        to = self.entrance - obs.pos
+        dist = np.linalg.norm(to)
+        self.goal = self.entrance
+        self.heading = np.arctan2(to[1], to[0])
+        if dist < 2.0:
+            self.mode = "explore"     # keep the heading: it points into the cave
+            return np.zeros(3)
+        speed = self.info["max_speed_xy"] * 0.7 * min(1.0, dist / 3.0)
+        return speed * to / max(dist, 1e-6)
+
     def go_home(self, obs):
         # Drift can put the next crumb behind a wall; skip it when we stop making progress.
         self.stall = self.stall + 1 if np.linalg.norm(obs.vel[:2]) < 0.3 else 0
@@ -152,7 +165,7 @@ class ExplorerAgent(Agent):
         self.visited.add(self.cell(obs.pos))
         self.remember(obs)
 
-        if self.mode == "explore":
+        if self.mode in ("enter", "explore"):
             need = self.path_home(obs.pos) / (0.6 * self.info["max_speed_xy"])
             spare_batt = obs.battery - (need / self.info["hover_endurance_s"] * 1.8 + 0.10)
             spare_time = self.info["mission_time_s"] - obs.t - (need * 1.8 + 20)
@@ -161,7 +174,7 @@ class ExplorerAgent(Agent):
 
         if self.mode == "land":
             return Command(land=True, reports=self.reports(obs))
-        v = self.explore(obs) if self.mode == "explore" else self.go_home(obs)
+        v = {"enter": self.enter, "explore": self.explore}.get(self.mode, self.go_home)(obs)
         v = v + self.avoid(obs)
         v[2] += self.hold_middle(obs)
         yaw_rate = 2.0 * wrap(self.heading - obs.yaw)

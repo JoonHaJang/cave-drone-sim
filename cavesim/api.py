@@ -36,10 +36,13 @@ class Observation:
     # --- raw sensors
     imu: np.ndarray           # (K, 7) samples since last tick: t, ax, ay, az [m/s^2], gx, gy, gz [rad/s];
                               #   accelerometer reads specific force (about +9.81 on z when hovering)
-    lidar: np.ndarray         # (N, 3) hit points in body frame; misses are dropped
-    lidar_dirs: np.ndarray    # (M, 3) unit beam directions (body), M = channels * azimuth_steps
+    lidar: np.ndarray         # (N, 3) hit points in body frame (origin = body centre); misses are dropped
+    lidar_dirs: np.ndarray    # (M, 3) unit beam directions (body) from the sensor at lidar_mount, M = channels * azimuth_steps
     lidar_ranges: np.ndarray  # (M,) range per beam, np.inf for no return.
-                              #   reshape(channels, azimuth_steps) gives the range image
+                              #   reshape(channels, azimuth_steps) gives the range image.
+                              #   Like the real sensor, each column is measured from the pose at
+                              #   its own firing time (see lidar_t), so fast motion smears the
+                              #   scan; near the floor, rotor dust adds short spurious returns.
     range_down: float         # downward rangefinder (body -z), m, np.inf if out of range
     baro_alt: float           # barometric altitude relative to take-off, m
     battery: float            # 1.0 full, 0.0 empty (motors cut)
@@ -50,6 +53,16 @@ class Observation:
     base_link: bool           # True if the base station is in direct range
     report_results: list      # list[(report, accepted: bool, reason: str)] from last tick
     landed: bool
+    lidar_t: Any = None       # (M,) firing time of each beam, s; deskew with obs.imu
+    lidar_mount: Any = (0.0, 0.0, 0.0)   # (3,) sensor origin in the body frame; beams blocked by the frame come back np.inf
+    gps: Any = None           # (3,) GNSS fix in the odom frame under open sky (outdoors), else None.
+                              #   Error wanders slowly (about 1 m horizontal, 2 m vertical)
+
+
+# Keys held down in the viewer (cavesim.run puts them here; agents.manual flies by them). Kept in
+# this module, not in run.py: run as `python -m cavesim.run`, that file is __main__ and a second
+# import of it would hold a different dict.
+PILOT = {"keys": frozenset()}
 
 
 def body_rotation(roll, pitch, yaw):

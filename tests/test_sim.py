@@ -6,7 +6,7 @@ import pytest
 
 from cavesim.api import Agent, Command
 from cavesim.cavegen import PRESETS, grow_graph
-from cavesim.config import AeroParams, SimConfig
+from cavesim.config import IMU_PRESETS, AeroParams, SimConfig
 from cavesim.sim import Simulator
 
 MAP = Path(__file__).resolve().parent.parent / "maps" / "small_2"
@@ -16,6 +16,8 @@ def make(agent_cls, n=2, **kw):
     cfg = SimConfig(mission_time_s=kw.pop("t", 30))
     if "aero_params" in kw:
         cfg.aero = kw.pop("aero_params")
+    if "imu" in kw:
+        cfg.imu = IMU_PRESETS[kw.pop("imu")]
     return Simulator(MAP, n, agent_cls, cfg=cfg, **kw)
 
 
@@ -56,6 +58,23 @@ def test_fast_wall_impact_crashes():
     while sim.step():
         pass
     assert sim.drones[0].status == "crashed"
+    sim.close()
+
+
+def test_wall_bump_tips_but_survives():
+    class Bump(Agent):
+        def step(self, obs):
+            return Command(vel=(1.2, 1.2, 0.0))
+
+    sim = make(Bump, n=1, aero="off", t=20)
+    d, tilt = sim.drones[0], 0.0
+    while sim.step() and not d.hits:
+        pass
+    for _ in range(3):
+        tilt = max(tilt, np.degrees(np.arccos(d.thrust_dir[2])))
+        sim.step()
+    assert d.hits and d.status == "flying"
+    assert tilt > 5          # knocked off level, not just stopped
     sim.close()
 
 
@@ -101,7 +120,7 @@ def test_imu_hover_matches_spec():
                 samples.append(obs.imu)
             return Command()
 
-    sim = make(Hover, n=1, t=5, aero="off")
+    sim = make(Hover, n=1, t=5, aero="off", imu="datasheet")
     while sim.step():
         pass
     imu = np.concatenate(samples)
@@ -165,7 +184,7 @@ def test_ceiling_effect_pulls_up():
     d = sim.drones[0]
     hit = sim.pb.rayTest([0, 0, 0], [0, 0, 20])[0]
     top = 20 * hit[2]
-    sim.pb.resetBasePositionAndOrientation(d.body, [0, 0, top - sim.cfg.drone.radius - 0.1],
+    sim.pb.resetBasePositionAndOrientation(d.body, [0, 0, top - sim.cfg.drone.height / 2 - 0.1],   # disc: thin up and down
                                            [0, 0, 0, 1])
     sim.aero_disturbance(sim.cfg.dt)
     ap = sim.cfg.aero
@@ -183,5 +202,45 @@ def test_speleothems_are_solid():
     x, y, z = s["base"]
     z -= 0.3 * s["length"]          # a third of the way down the spike
     hit = sim.pb.rayTest([x - 1.5, y, z], [x + 1.5, y, z])[0]
-    assert hit[0] == sim.cave and hit[2] < 0.5
+    assert hit[0] in sim.caves and hit[2] < 0.5
+    sim.close()
+
+
+def test_rescue_lap_is_timed_from_survivor_to_home_landing():
+    class Hover(Agent):
+        def step(self, obs):
+            return Command()
+
+    sim = make(Hover, n=1, t=30)
+    sim.mission = {"type": "rescue", "target": 0}
+    d, goal = sim.drones[0], sim.target()
+    sim.step()
+    assert sim.rescued == {} and sim.score()["success"] is False
+    sim.pb.resetBasePositionAndOrientation(d.body, (goal + [0, 0, 1.0]).tolist(), [0, 0, 0, 1])
+    sim.step()
+    assert 0 in sim.rescued and sim.laps == {}
+    sim.pb.resetBasePositionAndOrientation(d.body, sim.base.tolist(), [0, 0, 0, 1])
+    d.status = "landed"
+    sim.step()
+    s = sim.score()
+    assert s["success"] and s["lap_time_s"] == round(sim.laps[0], 1) and s["artifacts_found"] == 1
+    sim.close()
+
+
+def test_leaving_the_course_ends_the_run():
+    class Hover(Agent):
+        def step(self, obs):
+            return Command()
+
+    sim = make(Hover, n=1, t=30)
+    sim.staging_box = np.array([sim.base - 2.0, sim.base + 2.0])
+    d = sim.drones[0]
+    for _ in range(15):
+        sim.step()
+    assert d.status == "flying"                       # in the staging box
+    above = sim.base + [0, 0, 60.0]                   # over the cave: rock below, none above
+    for _ in range(15):
+        sim.pb.resetBasePositionAndOrientation(d.body, above.tolist(), [0, 0, 0, 1])
+        sim.step()
+    assert d.status == "out" and sim.score()["out_of_course"] == [0]
     sim.close()
