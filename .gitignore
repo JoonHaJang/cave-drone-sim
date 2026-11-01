@@ -4,9 +4,6 @@ __pycache__/
 results/
 *.out
 
-# Sketchfab Standard licence: keep the downloaded drone model out of the public repo
-bionic_dragonfly_four-axis_uav_aircraft/
-drone_3d_model/
 
 # Downloaded datasets for sensor calibration (see docs/sensors.md)
 data/

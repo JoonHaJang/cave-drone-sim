@@ -15,6 +15,6 @@ published on Gazebo Fuel (https://fuel.gazebosim.org/1.0/OpenRobotics/models/<na
 The cave tiles and rock textures of the imported SubT maps (`maps/<world>/`) are by Open Robotics,
 CC BY 4.0, from the same source.
 
-The drone model is not in the repo: put Sketchfab's "Bionic dragonfly four-axis UAV aircraft" by
-boxgizmo (Sketchfab Standard licence) in `drone_3d_model/scene.gltf`. Without it drones are drawn
-as spheres.
+The drone model, `drone_3d_model/scene.gltf`, is Sketchfab's "Bionic dragonfly four-axis UAV
+aircraft" by boxgizmo (Sketchfab Standard licence, see `drone_3d_model/license.txt`). Without it
+drones are drawn as spheres.

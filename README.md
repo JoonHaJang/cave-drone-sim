@@ -133,13 +133,9 @@ python -m cavesim.check
 
 창이 안 열리면 브라우저의 팝업 차단을 `localhost`에 대해 풀어 주세요.
 
-### 2-4. 드론 3D 모델 (선택)
+### 2-4. 드론 3D 모델
 
-드론을 실제 기체 모양으로 보려면 3D 모델을 따로 받아야 합니다. 라이선스 문제로 저장소에는 넣지 않았습니다. 모델이 없어도 시뮬레이션과 채점은 똑같고, 드론이 색 공으로 그려질 뿐입니다.
-
-1. Sketchfab에서 "Bionic dragonfly four-axis UAV aircraft"(작성자 boxgizmo) 페이지를 찾아 로그인한 뒤 **Download 3D Model → glTF**로 받습니다.
-2. 압축을 풀어 프로젝트 폴더 바로 아래에 `bionic_dragonfly_four-axis_uav_aircraft\scene.gltf`가 오게 둡니다. 같은 폴더에 `scene.bin`도 있어야 합니다.
-3. 뷰어를 새로고침합니다.
+드론은 `drone_3d_model/scene.gltf`의 3D 모델로 그려집니다. 모델은 Sketchfab의 "Bionic dragonfly four-axis UAV aircraft"(작성자 boxgizmo, Sketchfab Standard 라이선스)이고 저장소에 들어 있습니다. 출처는 `drone_3d_model/license.txt`에 있습니다. 모델 파일이 없으면 드론이 색 공으로 그려지고, 시뮬레이션과 채점은 똑같습니다.
 
 0.5 m짜리 모델은 멀리서는 거의 보이지 않아서, 카메라가 7 m보다 멀어지면 색 공과 방향 원뿔이 같이 그려집니다.
 
@@ -318,5 +314,5 @@ tests/          자동 테스트 (pytest)
 | `conda env create`가 `conda-launchers` 관련 오류로 실패 | conda 26.x의 버그입니다. `mamba env create`를 쓰세요. 설치 스크립트는 이미 mamba를 씁니다. |
 | Python이 아무 메시지 없이 종료됨 (Windows 오류 코드 `0xC06D007F`) | numpy가 MKL 2026.x를 쓰면 일부 PC에서 행렬 곱셈 중에 죽습니다. `environment.yml`이 OpenBLAS로 고정해 두었으니 `mamba env update -n cave-drone -f environment.yml -y`로 다시 맞추세요. |
 | 뷰어가 "연결 끊김" | 실행기(`python -m cavesim.run`)가 꺼졌습니다. 터미널의 오류를 확인하세요. |
-| 드론이 모델이 아니라 색 공으로 보임 | 3D 모델 파일이 없습니다. [2-4](#2-4-드론-3d-모델-선택)를 보세요. |
+| 드론이 모델이 아니라 색 공으로 보임 | `drone_3d_model/scene.gltf`와 `scene.bin`이 있는지 확인하세요. [2-4](#2-4-드론-3d-모델)를 보세요. |
 | 포트 8000 또는 8765가 사용 중 | `--http-port 8001 --ws-port 8766`처럼 다른 포트를 지정하세요. |
