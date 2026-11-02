@@ -60,7 +60,7 @@ def test_drift_gate_drops_a_correction_the_odometry_cannot_have_drifted():
 
 def test_cell_means_stay_in_their_voxel_over_many_dense_sweeps():
     # 300 m out, many returns per cell per sweep: the running mean's cap must not inflate the mean
-    # (it scaled the sum as if the count were exactly 20: cells drifted metres off, research_notes 13)
+    # (it scaled the sum as if the count were exactly 20: cells drifted metres off)
     from agents.lio import VOX
     rng = np.random.default_rng(0)
     m, p = ScanMatcher(), np.array([300.0, -150.0, -40.0])
@@ -75,7 +75,7 @@ def test_cell_means_stay_in_their_voxel_over_many_dense_sweeps():
 
 def test_time_counts_as_degenerate_only_while_a_registration_finds_it_so():
     # the flag stayed at the last registration's value through new ground: 300 s of "degenerate" time
-    # widened the drift gate from 0.5 to 3.1 m (static audit, research_notes 13)
+    # widened the drift gate from 0.5 to 3.1 m (static audit)
     m = ScanMatcher()
     m.degenerate = 1                                             # the last fit, in a tunnel
     rng = np.random.default_rng(0)

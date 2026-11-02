@@ -42,7 +42,7 @@ class LidarParams:
     # half height). Beams that cross the rotor disc (prop_z, tips at prop_r) hit the props and
     # arms; as real pipelines do (self-filter), those returns are dropped -- above
     # atan((prop_z - mount_z) / prop_r), about 33 deg here, the sensor sees nothing. The bottom
-    # mount sees the floor down to -45 deg, which the cave benchmark needs (research_notes 9.3);
+    # mount sees the floor down to -45 deg, which the cave benchmark needs;
     # "lite-top" is the SubT scouts' top mount, blind below about -16 deg.
     mount_z: float = -0.13
     prop_z: float = 0.03

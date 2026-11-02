@@ -1,6 +1,8 @@
-"""Reference agent: build a voxel map from LiDAR, plan with A*, follow the path with a position loop.
+"""Demo agent vDEMO: build a voxel map from LiDAR, plan with A*, follow the path with a position loop.
 
-    python -m cavesim.run --map rescue_easy --agent agents.planner --drones 1
+    python -m cavesim.run --agent agents.planner --map rescue_easy --drones 1 --lidar lite
+
+Students may read it for ideas, not copy it (docs/student_guide.md).
 
 Mapping. Every sweep is first aligned to the map built so far (agents.lio: point-to-plane
 ICP on top of the odometry, as LIO front ends do), so a place flown through again lines up
@@ -72,7 +74,7 @@ DUST_GAP = 1.0          # m: lower than this over the floor, the rotors lift dus
 DUST_R = 0.6            # this are mostly dust: they are left out of braking, push-off and the ceiling check
 FOOTPRINT = [(0.0, 0.0), (0.25, 0.0), (-0.25, 0.0), (0.0, 0.25), (0.0, -0.25)]   # m, the rotor disc
 CREEP_Z = 0.3           # m/s we may climb into space not mapped free (the simulator counts no hit below 0.3)
-FEEL_S = 1.0            # s commanding up (or down) without moving that way: rock felt above, mapped (notes 13.19)
+FEEL_S = 1.0            # s commanding up (or down) without moving that way: rock felt above, mapped
 FEEL_DROP_S = 1.5       # ... and this long at full descent out of the ceiling effect's reach
 CEIL_M = 1.0            # m: keep at least this far below the ceiling -- closer, the rotor wash sucks the drone
                         # up into it (ceiling effect, ~0.8 m reach) faster than the autopilot pulls back
@@ -80,13 +82,13 @@ NODE_BUDGET = 12_000    # A* expansions per plan (long legs go over the navigati
 WINDOW_M = 30.0         # plan in detail only this far around the drone (cf. TARE / GBPlanner local planners)
 REACH_M = 1.5           # m from the *detected* survivor counts as there (the rules allow 3 m in sight) ...
 FRESH_S = 1.0           # ... by a fix this recent: an old fix moves with every pose correction since (easy, 20 m
-                        # error: turned home 4 m short, notes 10)
+                        # error: turned home 4 m short)
 LOST_S = 10.0           # at the fix and no sight of the survivor for this long: the fix was wrong, search again
 STOP_M = 2.0            # plans to the survivor end this far off: it lies on the floor and is itself an obstacle
 LAND_RD = 0.7           # m on the rangefinder: below this (and still) the autopilot's own landing takes over
 RESCUE_FIRST = True     # the rescue counts, the way home comes second (Q3): give up only once even the
                         # lower bound on the rescue (straight line at full speed) no longer fits the
-                        # flight time left -- t + LB <= T (research_notes 10). False: GBPlanner's homing rule.
+                        # flight time left -- t + LB <= T. False: GBPlanner's homing rule.
 FINISH_M = 40.0         # this close to the survivor (or with it in view), the rescue comes before the battery rule
 SEARCH_M = 2.5          # m from the given coordinates: start searching for the survivor
 SEARCH_STALL_S = 60.0   # s without a metre gained on the given position: search from farther out
@@ -113,39 +115,39 @@ FLOOR_MIN_M = 0.5       # ... and in the cave (low passages: 0.5 m keeps the air
 HOLE_NBRS = 13          # an unknown voxel with more free neighbours (of 26) is a gap between beams, not a frontier
 DZ_W = 5.0              # height counts this much more in the distance a frontier leaves to the goal: caves are
                         # stacked levels, and a level above the goal is close only as the crow flies
-                        # (hard 64: 54 vs 46 rescued at 3.0 -- the level over the survivor stopped drawing it, notes 11)
+                        # (hard 64: 54 vs 46 rescued at 3.0 -- the level over the survivor stopped drawing it)
 # Doubling commitment (online search with predictions; Angelopoulos 2023, Banerjee et al. 2023):
 # the frontier score is a prediction and may be wrong, so no region of the cave gets more than a
 # budget of wasted time -- time not spent bringing us closer to the goal (the lower bound on what is
 # left) at full speed; hovering and dithering count too -- before the others get their turn; every
 # full round doubles it.
-DOUBLING = False        # measured: the budgets cost hard its junction (research_notes 9); kept for the experiment
+DOUBLING = False        # measured: the budgets cost hard its junction; kept for the experiment
 BUDGET_S0 = 30.0        # s of waste a region gets in the first round (larger: trust the prediction longer)
 BUDGET_R = 2.0          # budget growth per round
 REGION_M = 16.0         # m: frontiers are grouped into regions of this size
 CLEARANCE = None        # tight = next to an occupied voxel (None); within R_CLEAR of the seen rock
-                        # surface ("dist"); or either ("union") -- research_notes 10; or next to an occupied
-                        # voxel *and* within R_CLEAR of the surface measured round it ("measured", notes 12)
+                        # surface ("dist"); or either ("union"); or next to an occupied
+                        # voxel *and* within R_CLEAR of the surface measured round it ("measured")
 R_SEEN = 1.0            # "measured": a margin voxel is let go only with measured surface this near it
 GUARD_MAP = True        # the guard also brakes for rock surface cells the map holds (blind sides)
 SURF_RES = 0.25         # m, rock surface cells (returns)
 SURF_SCALE = 2          # surface cells per voxel edge (RES / SURF_RES)
 SURF_N = 2              # sweeps a surface cell must be seen in (a single one is often dust or a ghost)
-SURF_CLEAR_M = 3.0      # m: surface cells this near that a live beam passes through are dropped (stale, notes 13.15)
+SURF_CLEAR_M = 3.0      # m: surface cells this near that a live beam passes through are dropped (stale)
 R_CLEAR = 0.5           # m from a voxel centre (where paths run) to the nearest rock surface cell centre
 ALT_MODE = "high"       # experiment: None, "high" (hug the ceiling, CEIL_M + 0.5 below it), "ceil" (the same, from the
                         # ceiling alone) or "mid" (halfway up)
 ALT_W = 1.0             # ... step cost x (1 + ALT_W x the normalised height error)
 FRONTIER_W = 1.0        # weight of the distance still to go: 1 = optimistic A* (unknown space assumed open); more is greedy and skips branches that first lead away
 RECOVERY = False        # stuck (no certified path, or no headway): back off to a place flown through,
-                        # look around, drop the frontier that failed, replan (research_notes 10)
+                        # look around, drop the frontier that failed, replan
 STUCK_M = 1.0           # m: moving less than this ...
 STUCK_S = 10.0          # ... for this long, in the rescue, is being stuck
 RETREAT_M = 4.0         # m: back off to the nearest graph node at least this far
 LOOK_S = 2 * math.pi / 0.8 + 1.0   # s of spinning at the yaw-rate limit: one full turn
 ESCAPE_COST = 4.0       # cost factor for margin voxels next to rock, allowed only within 1.5 m of the start
 RELAX = False           # no way on through certified voxels: plan again across margin voxels (not rock);
-                        # measured: hard 9/16 vs 11/16 off (circling in margin before the survivor, notes 10)
+                        # measured: hard 9/16 vs 11/16 off (circling in margin before the survivor)
 RF_TRACK_M = 1.5         # m: ... and only over a graph node this close, below (we came up that way)
 RF_BEAM_R = 0.3          # m: map cells this close to the vertical below are checked against the rangefinder
 GUARD_SEEN_UP_DEG = 30.0  # above this the bottom mount's view is the airframe (props at ~33 deg): map fills in
@@ -155,7 +157,7 @@ SAFE_SET_V = 0.5        # m/s
 OPEN_WAY = True         # trapped: of the directions open OPEN_MIN on the live scan *and* the mapped surface,
                         # leave by the one nearest the map's way back (the map, built on a drifted pose, put
                         # its way back into real rock -- the live returns blocked it, or rock inside the
-                        # LiDAR's 0.3 m / above its cone was pushed against: 6 hard runs sat 600+ s, notes 10)
+                        # LiDAR's 0.3 m / above its cone was pushed against: 6 hard runs sat 600+ s)
 OPEN_MIN = 1.0          # m of free tube that counts as open
 OPEN_R = 0.35           # m: radius of the tube a direction must keep clear (the airframe is 0.2)
 OPEN_SEEN_DEG = 15.0    # a direction with no return this close to it is the LiDAR's blind side: not open
@@ -174,22 +176,22 @@ def block_deltas(l1):
 BLOCK_DELTAS = block_deltas(MARGIN_L1)
 SOFT_MARGIN = True      # the corner neighbours (rock 0.35-0.43 m off) may be crossed at SOFT_COST: wide
 SOFT_COST = 4.0         # ways first, the narrow one when it is the only one (the last 35 m to the hard
-                        # survivor are margin by the full 3x3x3 rule but flyable: notes 10)
+                        # survivor are margin by the full 3x3x3 rule but flyable)
 HARD_DELTAS = block_deltas(2)
 SOFT_NEAR_M = 120.0     # ... only this close to the survivor's coordinates (plus their stated error): everywhere,
                         # it opened narrow wrong ways at the 340 m junction, 180 m off (hard 32: 17 vs 20
                         # rescued); at 60 m the neck 70 m short of it stayed margin and sent the search up
-                        # a chimney the drone wedged in (notes 10)
+                        # a chimney the drone wedged in
 SOFT_LOCAL_M = 0.0      # ... and this close to the drone, where the live LiDAR is looking at the neck itself
                         # (the 340 m junction's way on is a 7 m neck). At 6 m: hard 60 vs 59 /64 without an
-                        # error, 51 vs 58 with 20 m -- it opens wrong narrow ways too; off (notes 11)
+                        # error, 51 vs 58 with 20 m -- it opens wrong narrow ways too; off
 SOFT_FAR_COST = 0.0     # farther off: this factor (0 = not at all). The 340 m junction's way on is such a
-                        # neck, 180 m off: blocked, the search had only the upper level left (notes 10)
+                        # neck, 180 m off: blocked, the search had only the upper level left
 ESCALATE_S = 180.0       # s in the rescue without a metre gained on the height-weighted distance left: the way on
                         # was classed shut somewhere behind us. Open the soft margin round the place we were
                         # nearest (and go back there). Rescued hard runs stall <= 120 s, the 340 m junction's
-                        # failures >= 480 s (v15, 64 seeds, notes 13). Off: easy 20 m error
-                        # 25 vs 31 /32 rescued (v20 vs v18); the global version (v19) 58 vs 59 /64 hard (notes 13)
+                        # failures >= 480 s (64 seeds). Off: easy 20 m error
+                        # 25 vs 31 /32 rescued; a global version 58 vs 59 /64 hard
 ESCALATE_R = 30.0       # m round that place
 CELL_OFFSETS = np.array(np.meshgrid(*[np.arange(FRONTIER_CELL)] * 3, indexing="ij")).reshape(3, -1).T
 # Clearance: a voxel centre is the corner of 8 surface cells; the cells whose centres lie within
@@ -199,7 +201,8 @@ _g = np.arange(-4, 4)
 _o = np.array(np.meshgrid(_g, _g, _g, indexing="ij")).reshape(3, -1).T
 CLEAR_DELTAS = [int((int(i) << 42) + (int(j) << 21) + int(k)) for i, j, k in _o
                 if np.linalg.norm((np.array([i, j, k]) + 0.5) * SURF_RES) < R_CLEAR]
-CLEAR_DIRTY = np.array(np.meshgrid(*[np.arange(-2, 3)] * 3, indexing="ij")).reshape(3, -1).T
+CLEAR_DIRTY = [int((int(i) << 42) + (int(j) << 21) + int(k))       # as key deltas, like CLEAR_DELTAS
+               for i, j, k in np.array(np.meshgrid(*[np.arange(-2, 3)] * 3, indexing="ij")).reshape(3, -1).T]
 
 
 def keys_of(idx):
@@ -223,7 +226,7 @@ class Tight:
             # The 3x3x3 rule blocks a voxel for rock anywhere in the next voxel, up to 0.75 m off: it
             # closed 1-1.5 m necks the drone flies (the 340 m junction's way on). Let a margin voxel
             # go where the measured surface is R_CLEAR off -- only beside rock actually measured, so a
-            # gap in the sparse returns never certifies anything (that sank "dist": notes 10, 12).
+            # gap in the sparse returns never certifies anything (that sank "dist").
             return key in m.occ or (key in m.block_n and not m.clear(key))
         return key in m.occ or (CLEARANCE == "union" and key in m.block_n) or not m.clear(key)
 
@@ -324,15 +327,16 @@ class VoxelMap:
             surf[c] = n
             if n == SURF_N:
                 base = np.floor(idx_of(c) * SURF_RES / RES).astype(np.int64)     # the voxel it lies in
-                for o in CLEAR_DIRTY:
-                    cache.pop(int(keys_of(base + o)), None)
+                kb = int(keys_of(base))
+                for d in CLEAR_DIRTY:
+                    cache.pop(kb + d, None)
 
     def clear_surface(self, origin, pts):
         """A surface cell within SURF_CLEAR_M that a live beam passes through -- within half a cell of
         its centre, on to a return beyond it -- is not rock: a beam went on. Cells were never cleared,
         and those laid on the way out under another pose error stood 0.2-0.3 m off the drone on the
         way back, in the free space the beams went through: the guard's push-offs cancelled the
-        command at a neck the drone had flown, 90 s (hard, notes 13.15). Counts run to hundreds, so
+        command at a neck the drone had flown, 90 s (hard). Counts run to hundreds, so
         it drops to one short of rock: real rock is hit again the next sweep, and is rock again."""
         q = self.surface_near(origin, SURF_CLEAR_M)
         if not len(q) or not len(pts):
@@ -348,8 +352,9 @@ class VoxelMap:
         for c in keys_of(np.floor(q[through] / SURF_RES).astype(np.int64)).tolist():
             surf[c] = SURF_N - 1
             base = np.floor(idx_of(c) * SURF_RES / RES).astype(np.int64)   # the clearance round it changes
-            for o in CLEAR_DIRTY:
-                cache.pop(int(keys_of(base + o)), None)
+            kb = int(keys_of(base))
+            for d in CLEAR_DIRTY:
+                cache.pop(kb + d, None)
 
     def clear(self, key):
         """Is the voxel centre at least R_CLEAR from every rock surface cell?"""
@@ -495,7 +500,7 @@ class VoxelMap:
                 if m not in free:
                     # Frontier: unknown voxel on the edge of unmapped space. A goal for this plan, never crossed.
                     # Only off a passable voxel: seen from the escape margin it is the blind cone over a
-                    # drone squeezed under the ceiling, and creeping into it pinned the drone there (notes 10).
+                    # drone squeezed under the ceiling, and creeping into it pinned the drone there.
                     if m not in came and not self.is_hole(m) and (k not in blocked or soft_cost(k)):
                         came[m], cost[m] = k, nc
                         self.frontiers_seen.append((m, nc))
@@ -509,7 +514,7 @@ class VoxelMap:
         self.reached_goal = best[0] < 0
         if RELAX and not relax and best[1] == s:
             # Nothing but margin round the certified voxels we can reach: a passage narrower than the
-            # 3x3x3 margin asks for (21-31 % of flyable voxels near the track are margin: notes 10).
+            # 3x3x3 margin asks for (21-31 % of flyable voxels near the track are margin).
             return self.plan(start, goal, stop_m, relax=True)
         path, k = [], best[1]
         while k is not None:
@@ -562,7 +567,7 @@ class VoxelMap:
         """Every frontier within r m of start over passable voxels, whichever way the goal lies:
         [(voxel key, travel m)]. plan() is pulled toward its goal and never expands the other way, so
         a way on that first leads away was never remembered: the J1 chamber's exit lay east of the
-        drone, the survivor west -- 1031 frontier voxels mapped there, none in memory (hard, notes 13.14)."""
+        drone, the survivor west -- 1031 frontier voxels mapped there, none in memory (hard)."""
         s = int(keys_of(self.voxel(start)))
         si, sj, sk = (int(x) + OFF for x in self.voxel(start))
         r2 = (r / RES) ** 2
@@ -761,8 +766,7 @@ class PlannerAgent(Agent):
         """Index of the road node the local planner takes us to: HOME_LEG_M along, but no further
         than the last node inside the course rule. Past the cave mouth the road runs over the staging
         area, which no plan may enter: the plan to a node there failed, and its partial end lay 15 m
-        back in the cave -- in and out of the mouth for 35 s, the GNSS fix coming and going (easy 6,
-        notes 13.16). 0: none, fly the road itself."""
+        back in the cave -- in and out of the mouth for 35 s, the GNSS fix coming and going (easy 6). 0: none, fly the road itself."""
         along, j = 0.0, 0
         while j < len(road) - 1 and along < HOME_LEG_M and self.map.allowed(int(keys_of(self.map.voxel(road[j + 1])))):
             along += np.linalg.norm(road[j + 1] - road[j])
@@ -918,11 +922,11 @@ class PlannerAgent(Agent):
             if path and (self.map.reached_goal or np.linalg.norm(f["pos"] - obs.pos) > UNREACHED_M):
                 return path
             # Close by and out of reach (behind the mapped floor, say): drop it now, not after
-            # GOAL_PATIENCE_S of hovering -- the next one was the same, for 550 s (easy, notes 11).
+            # GOAL_PATIENCE_S of hovering -- the next one was the same, for 550 s (easy).
             del self.frontiers[self.committed]
             self.committed = None
         # Not the local search toward the goal either: with the given position 9 m off, that led up
-        # through a hole in the roof and out of the course (easy, notes 11). The next replan goes on.
+        # through a hole in the roof and out of the course (easy). The next replan goes on.
         return []
 
     def path_blocked(self):
@@ -962,7 +966,7 @@ class PlannerAgent(Agent):
             elif not self.seen and (self.mode == "search" or self.search_now(obs, dist)):
                 # Rescue first: keep searching while t + LB <= T allows. (Starting already inside the
                 # drift radius, ~30 m late in a run, swept the known ground round a corner from the
-                # survivor till the battery died: hard 4/16, notes 10.)
+                # survivor till the battery died: hard 4/16.)
                 if self.search_until is None:
                     self.search_until = obs.t + SEARCH_S
                 self.mode = "search" if RESCUE_FIRST or obs.t < self.search_until else "home"
@@ -1071,7 +1075,7 @@ class PlannerAgent(Agent):
         than its minimum range it sees nothing at all): felt instead. Commanding a climb that does not
         happen, or a descent the ceiling effect holds us back from, for FEEL_S -- clear of the floor --
         means rock within a voxel above: mapped so. Creeping up into a ceiling pocket at the cave mouth
-        pinned the drone there 35 s, its frontiers never seen nor dropped (easy 0, notes 13.19)."""
+        pinned the drone there 35 s, its frontiers never seen nor dropped (easy 0)."""
         if obs.gps is not None or obs.vel is None or not np.isfinite(obs.range_down) or obs.range_down < 1.0:
             self.held = None
             return
@@ -1096,11 +1100,11 @@ class PlannerAgent(Agent):
         pts = obs.lidar
         if GUARD_MAP and use_map and obs.range_down >= DUST_GAP:
             # The rock the map has seen, too: the side the LiDAR is blind to (the ceiling for a
-            # bottom mount) is where the drone hit what it knew was there (research_notes 10).
+            # bottom mount) is where the drone hit what it knew was there.
             # In rotor dust, near returns -- and the surface cells they made -- are not trusted.
             # Only where the LiDAR cannot see: elsewhere its live returns are the truth, and mapped
             # cells laid down under another pose error stood 0.3 m off with the nearest live return
-            # 2 m away, and stopped the drone for 700 s, 26 m from the survivor (hard, notes 11).
+            # 2 m away, and stopped the drone for 700 s, 26 m from the survivor (hard).
             m = (self.map.surface_near(obs.pos, GUARD_M) - obs.pos) @ R
             d = np.linalg.norm(m, axis=1)
             el = np.degrees(np.arcsin(np.clip(m[:, 2] / np.maximum(d, 1e-6), -1.0, 1.0)))
@@ -1109,9 +1113,9 @@ class PlannerAgent(Agent):
             if self.mode == "home" and np.isfinite(obs.range_down) and self.came_from_below(obs.pos):
                 # Straight down the rangefinder is the truth: cells on its beam short of its reading are
                 # stale (a ceiling seen from below, the drone since up through a hole in it: 700 s
-                # hovering over the hole, easy 20 m error, notes 13). Only over our own track: a beam
-                # through a crack in a ledge we never came through set the drone down in it (hard, notes 13).
-                # Only on the way home: on the way in it wedged the drone in a ceiling slot 4 times /64 (notes 13).
+                # hovering over the hole, easy 20 m error). Only over our own track: a beam
+                # through a crack in a ledge we never came through set the drone down in it (hard).
+                # Only on the way home: on the way in it wedged the drone in a ceiling slot 4 times /64.
                 w = m @ R.T
                 keep &= ~((np.hypot(w[:, 0], w[:, 1]) < RF_BEAM_R) & (w[:, 2] < 0) & (w[:, 2] > -(obs.range_down - 0.3)))
             pts = np.vstack([pts, m[keep]])
@@ -1124,7 +1128,7 @@ class PlannerAgent(Agent):
         allow = stop_speed(d[near] - SAFE_M)
         # Rock beside the tube we sweep is not closed on by flying along it, though each of its points
         # ahead is nearer each tick: along a 0.7 m slot (0.4 m drone) they cut the command to nothing,
-        # wedged 240 s (hard, 20 m error, notes 13). So they still slow us, but only down to SAFE_SET_V:
+        # wedged 240 s (hard, 20 m error). So they still slow us, but only down to SAFE_SET_V:
         # ignored outright, the drone grazed walls at speed off its commanded line and crashed (2 of 12).
         sp = np.linalg.norm(v)
         if sp > 1e-6:
@@ -1151,7 +1155,7 @@ class PlannerAgent(Agent):
         if obs.range_down < DUST_GAP:
             obs = dataclasses.replace(obs, lidar=obs.lidar[np.einsum("ij,ij->i", obs.lidar, obs.lidar) > DUST_R ** 2])
             # Nor into the map: dust in the drone's own voxel, where no beam passes to clear it, made it
-            # rock -- "trapped", the drone crept round the spot in the dust for minutes (hard, notes 13).
+            # rock -- "trapped", the drone crept round the spot in the dust for minutes (hard).
             pts = pts[np.einsum("ij,ij->i", pts, pts) > DUST_R ** 2]
         if SCAN_MATCH:
             p = self.lio.correct(R, np.asarray(obs.pos, dtype=float), pts, obs.t)
@@ -1235,10 +1239,10 @@ class PlannerAgent(Agent):
                 # takes the open sky for unexplored space and climbs into it.
                 # So is the staging area out of the GNSS fix (under the cave mouth's overhang): the course
                 # rule bars it to plans, and the drone hovered on an empty plan 4 m from the mouth till
-                # the battery died (hard, notes 13).
+                # the battery died (hard).
                 outdoors = obs.gps is not None or not self.map.allowed(int(keys_of(self.map.voxel(obs.pos))))
                 # No headway home for HOME_STUCK_S: the map has closed a neck we flew through (rock laid
-                # down under another pose error -- 600 s at the 108 m neck, hard, notes 13). The road
+                # down under another pose error -- 600 s at the 108 m neck, hard). The road
                 # itself was flown: follow it as it is, the guard keeps us off the rock.
                 left = sum(float(np.linalg.norm(b - a)) for a, b in zip(road, road[1:])) + float(np.linalg.norm(road[0] - obs.pos))
                 if self.home_ref is None or left < self.home_ref[1] - 1.0:
@@ -1256,14 +1260,14 @@ class PlannerAgent(Agent):
             self.next_plan = obs.t + REPLAN_S
 
         # Outside the passable set the plan has nowhere to start from (squeezed under a ceiling the
-        # bottom mount never saw, the drone sat on an empty plan till the battery died: notes 10).
+        # bottom mount never saw, the drone sat on an empty plan till the battery died).
         # Being there is itself the evidence: go back to the nearest certified voxels first.
         # Only when trapped -- in mapped rock, or with no plan at all: squeezing through margin voxels
         # is how narrow passages are flown, and pulling out of every one stalled 15 of 16 hard runs.
         trapped = not self.path or int(keys_of(self.map.voxel(obs.pos))) in self.map.occ
         back = self.map.way_back(obs.pos) if SAFE_SET and trapped and self.mode != "enter" else None
         # Way back on the live returns only: the map that says we sit in rock is what is wrong here,
-        # and its surface cells all round cancelled the way back to nothing (seed 15, notes 10).
+        # and its surface cells all round cancelled the way back to nothing (seed 15).
         if back is not None and OPEN_WAY:
             back = self.escape_way(obs, back)
         else:
@@ -1274,7 +1278,7 @@ class PlannerAgent(Agent):
         if back is not None and OPEN_WAY and np.linalg.norm(v) < 0.3 * SAFE_SET_V:
             # Wedged in a crack, rock 0.24 m off all round: the guard's push-offs cancel to nothing
             # (600 s at one spot, hard). The open_way tube is clear: leave along it, unguarded, at a
-            # quarter of the crash speed (notes 11).
+            # quarter of the crash speed.
             v = SAFE_SET_V * back
         if obs.t < self.drop_until and np.isfinite(obs.range_down) and obs.range_down > 1.5:
             v[2] = -self.info["max_speed_z"]
@@ -1283,7 +1287,7 @@ class PlannerAgent(Agent):
             v[2] = max(v[2], 1.0 * (AGL_MIN_M - obs.range_down))
         elif np.isfinite(obs.range_down):
             # Never sink onto the floor: a given position below it pushed the drone down through a hole
-            # in the floor mesh (easy, out of course), or onto it beside rock in rotor dust (hard): notes 11.
+            # in the floor mesh (easy, out of course), or onto it beside rock in rotor dust (hard).
             v[2] = max(v[2], 1.0 * (FLOOR_MIN_M - obs.range_down))
         # Nose toward where the path goes a few seconds on, not the momentary velocity: push-offs and
         # carrot swaps no longer swing it, and the camera looks round a bend before we get there.
@@ -1304,13 +1308,13 @@ class PlannerAgent(Agent):
         to_open = None if self.open_at is None else self.open_at - obs.pos
         if is_open or to_open is None or np.linalg.norm(to_open) < 0.3:
             # Keep the way out we took while it stays open: the map's way back swings round as rock
-            # is added, and the choice flipped every second, 180 deg, going nowhere (hard, notes 11).
+            # is added, and the choice flipped every second, 180 deg, going nowhere (hard).
             self.escape = open_way(rel, back if self.escape is None else self.escape)
             if is_open:
                 self.open_at = obs.pos.copy()
         else:
             # Rock 0.25 m off all round, no tube open anywhere: the pick among closed directions was
-            # noise and flipped every tick, the drone crept up a crack for 600 s (hard 36: notes 13).
+            # noise and flipped every tick, the drone crept up a crack for 600 s (hard 36).
             # We got in here, so the way we came is flyable: back to where a way out was last open.
             self.escape = to_open / np.linalg.norm(to_open)
         return self.escape
@@ -1353,8 +1357,8 @@ class PlannerAgent(Agent):
         """Start searching: within SEARCH_M of the given position; with an error, within it plus the
         detector's range (passed 6 m from the survivor, 22 m from the coordinates, and never came
         back: easy, 20 m error) -- or within twice that, if we have stopped getting closer: the given
-        position may be in rock (25 m from the survivor, 38 m from it, for 500 s: hard, notes 11).
-        Twice the error outright started too early (hard 20 m: 9/24, notes 11)."""
+        position may be in rock (25 m from the survivor, 38 m from it, for 500 s: hard).
+        Twice the error outright started too early (hard 20 m: 9/24)."""
         err = self.info.get("target_error_m", 0.0)
         if err <= 0:
             return dist < SEARCH_M
@@ -1367,7 +1371,7 @@ class PlannerAgent(Agent):
         """Fastest sweep that still sees every point within SEARCH_LOOK of the track. A point l off it
         stays within the detector's range r for 2 sqrt(r^2 - l^2) / v, while its bearing swings by
         2 atan(sqrt(r^2 - l^2) / l); turning the same way at YAW_RATE_MAX, the view must still gain a
-        full turn less its own fov on it. With 6 m, 120 deg: 1.27 m/s (it was 1 m/s, notes 13).
+        full turn less its own fov on it. With 6 m, 120 deg: 1.27 m/s (it was 1 m/s).
         (Leaving out the swing gave 1.83 m/s, which a test sweep showed missing a third of the headings.)"""
         r = self.info["detector_range"]
         a = np.sqrt(r ** 2 - (SEARCH_LOOK * r) ** 2)
@@ -1391,7 +1395,7 @@ class PlannerAgent(Agent):
             n = int(radius / RES)
             grid = np.array(np.meshgrid(*[np.arange(-n, n + 1, 2)] * 3)).reshape(3, -1).T
             grid = grid[np.linalg.norm(grid, axis=1) * RES <= radius] + self.map.voxel(self.target)
-            # In the course only: a high given position puts part of the sphere above ground (easy, notes 11).
+            # In the course only: a high given position puts part of the sphere above ground (easy).
             ks = [k for k in keys_of(grid).tolist() if self.map.passable(k) and self.map.allowed(k)]
             seen = np.array(self.searched)
             cand = []                                  # (frontier cell, or None for a mapped place; place)
@@ -1400,11 +1404,11 @@ class PlannerAgent(Agent):
                 cand += [(None, g) for g in c[np.min(np.linalg.norm(c[:, None] - seen[None], axis=2), axis=1) > look]]
             # The unmapped is searched too, on the same footing: sweeping only what we had mapped kept
             # a drone 30-45 m from a given position in rock while the survivor sat 16 m from it, past a
-            # neck we had not flown (hard, 20 m error: 17 of 20 failures; notes 11).
+            # neck we had not flown (hard, 20 m error: 17 of 20 failures).
             if obs.t >= self.next_survey:
                 # Frontiers are met only by searches toward a goal, which stop at the given position:
                 # the far side of the ball went unseen while the survivor sat 20 m from it there
-                # (hard, 20 m error, notes 11). Search toward it and six points round it.
+                # (hard, 20 m error). Search toward it and six points round it.
                 self.next_survey = obs.t + SURVEY_S
                 for o in np.vstack([np.zeros(3), np.eye(3), -np.eye(3)]) * 0.7 * radius:
                     self.map.plan(obs.pos, self.target + o, STOP_M)
@@ -1416,7 +1420,7 @@ class PlannerAgent(Agent):
             cand.sort(key=lambda cg: np.linalg.norm(cg[1] - self.target) + 0.5 * np.linalg.norm(cg[1] - obs.pos))
             # Keep the place we set out for till we get there, it proves out of reach, or we stop
             # gaining on it: re-ranked every replan, the choice swung between one ahead and one behind
-            # and the drone went to and fro for 300 s, 26 m from the survivor (hard, notes 11).
+            # and the drone went to and fro for 300 s, 26 m from the survivor (hard).
             sg = self.search_goal
             if sg is not None:
                 d = float(np.linalg.norm(sg[1] - obs.pos))
@@ -1430,7 +1434,7 @@ class PlannerAgent(Agent):
                         self.searched.append(sg[1])
                     else:
                         # For good: the next survey met it again, it ranked first again, and the drone sat
-                        # 5 m short of it for 360 s, wedged (hard 52, 20 m error, notes 13).
+                        # 5 m short of it for 360 s, wedged (hard 52, 20 m error).
                         self.given_up.add(sg[0])
                         self.frontiers.pop(sg[0], None)
                     # cand was ranked before this: without this, the same replan picked it again, patience anew
@@ -1446,7 +1450,7 @@ class PlannerAgent(Agent):
                 if not reached and kept and np.array_equal(g, sg[1])                         and not any(int(keys_of(self.map.voxel(p))) in self.map.occ for p in kept):
                     # The way there came and went with a neck's voxels flickering free and rock: each miss
                     # sent the drone 15 m off after another frontier and back, 100-160 s at the hard
-                    # survivor (20 m error, notes 13). Keep the way we had while no rock is mapped on it.
+                    # survivor (20 m error). Keep the way we had while no rock is mapped on it.
                     path, reached = kept, True
                 if path and (reached or (cell is not None and np.linalg.norm(g - obs.pos) > UNREACHED_M)):
                     self.path = path
@@ -1455,7 +1459,7 @@ class PlannerAgent(Agent):
                         self.search_goal = [cell, g, obs.t, float(np.linalg.norm(g - obs.pos))]
                     break
                 # Out of reach from here: count it searched (or forget the frontier), or the sweep
-                # follows partial plans round the known ground for good (hard, 20 m error, notes 11).
+                # follows partial plans round the known ground for good (hard, 20 m error).
                 if cell is None:
                     self.searched.append(g)
                 elif cell in self.frontiers:

@@ -6,6 +6,8 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const COLORS = [0xff6b6b, 0x4dabf7, 0x69db7c, 0xffd43b, 0xda77f2, 0xff922b, 0x38d9a9, 0xf783ac, 0xa9e34b];
 const $ = (id) => document.getElementById(id);
+// Scales every light; the cave textures read near-black at 1. Override with ?light=N.
+const LIGHT_GAIN = Number(new URLSearchParams(location.search).get("light")) || 5;
 
 // Drone model (glTF, y-up): Sketchfab "Bionic dragonfly four-axis UAV aircraft" by boxgizmo
 // (Sketchfab Standard licence, so not part of the repo). Without it the drones stay spheres.
@@ -76,8 +78,8 @@ let skyOpen = 0, skyCheckIn = 0;
 const DAY_SKY = new THREE.Color(0x9fb3c8);
 let daylight = 0;
 
-const hemi = new THREE.HemisphereLight(0xcfd8e3, 0x302820, 1.4);
-const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+const hemi = new THREE.HemisphereLight(0xcfd8e3, 0x302820, 1.4 * LIGHT_GAIN);
+const sun = new THREE.DirectionalLight(0xffffff, 1.2 * LIGHT_GAIN);
 sun.position.set(30, -40, 80);
 scene.add(hemi, sun);
 
@@ -764,10 +766,10 @@ function drawInCave(view, r) {
   for (const c of caveMeshes) c.mesh.material = c.fpv;
   const hemiI = hemi.intensity, sunI = sun.intensity;
   const day = daylight;
-  hemi.intensity = THREE.MathUtils.lerp(0.35, 1.3, day);   // some fill light in the cave too
-  sun.intensity = THREE.MathUtils.lerp(0, 1.4, day);
-  flood.intensity = THREE.MathUtils.lerp(70, 8, day);     // onboard LEDs matter in the dark only
-  beam.intensity = THREE.MathUtils.lerp(120, 12, day);
+  hemi.intensity = THREE.MathUtils.lerp(0.35, 1.3, day) * LIGHT_GAIN;   // some fill light in the cave too
+  sun.intensity = THREE.MathUtils.lerp(0, 1.4, day) * LIGHT_GAIN;
+  flood.intensity = THREE.MathUtils.lerp(70, 8, day) * LIGHT_GAIN;    // onboard LEDs matter in the dark only
+  beam.intensity = THREE.MathUtils.lerp(120, 12, day) * LIGHT_GAIN;
   scene.fog.near = THREE.MathUtils.lerp(12, 60, day);
   scene.fog.far = THREE.MathUtils.lerp(80, 600, day);
   scene.fog.color.setRGB(0, 0, 0).lerp(DAY_SKY, day);

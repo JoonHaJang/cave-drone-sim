@@ -124,7 +124,7 @@ def test_guard_trusts_the_rangefinder_over_mapped_cells_below(monkeypatch, range
 
 def test_escape_with_no_tube_open_goes_back_where_a_way_out_was_last_open():
     # wedged in a crack, rock 0.25 m off all round: the pick among closed tubes flipped every tick
-    # (hard 36, notes 13); we flew in, so we leave the way we came
+    # (hard 36); we flew in, so we leave the way we came
     from types import SimpleNamespace
     ag = P.PlannerAgent(0, 1, {"base": [0, 0, 0], "target": None, "lidar_vfov_deg": (-45.0, 45.0), "lidar_min_range": 0.3})
     u = np.random.default_rng(0).normal(size=(2000, 3))
@@ -141,7 +141,7 @@ def test_escape_with_no_tube_open_goes_back_where_a_way_out_was_last_open():
 
 def test_search_keeps_the_way_to_its_goal_when_a_replan_misses_it(monkeypatch):
     # a neck's voxels flickering free / rock made every other replan fail: the partial plan sent the
-    # drone 15 m off after another frontier and back (hard 16, 22 at 20 m error, notes 13)
+    # drone 15 m off after another frontier and back (hard 16, 22 at 20 m error)
     from types import SimpleNamespace
     ag = P.PlannerAgent(0, 1, {"base": [0, 0, 0], "target": [0, 0, 0], "target_error_m": 20.0, "detector_range": 6.0, "detector_half_fov_deg": 60.0,
                                "lidar_vfov_deg": (-45.0, 45.0), "lidar_min_range": 0.3})
@@ -168,7 +168,7 @@ def test_search_keeps_the_way_to_its_goal_when_a_replan_misses_it(monkeypatch):
 
 def test_search_does_not_go_back_to_a_frontier_it_gave_up_on(monkeypatch):
     # dropped after GOAL_PATIENCE_S without a gain, the next survey met it again and it ranked first
-    # again: 360 s wedged 5 m short of it (hard 52, 20 m error, notes 13)
+    # again: 360 s wedged 5 m short of it (hard 52, 20 m error)
     from types import SimpleNamespace
     ag = P.PlannerAgent(0, 1, {"base": [0, 0, 0], "target": [0, 0, 0], "target_error_m": 20.0, "detector_range": 6.0, "detector_half_fov_deg": 60.0,
                                "lidar_vfov_deg": (-45.0, 45.0), "lidar_min_range": 0.3})
@@ -199,7 +199,7 @@ def test_search_does_not_go_back_to_a_frontier_it_gave_up_on(monkeypatch):
 def test_rotor_dust_does_not_put_rock_where_the_drone_is(monkeypatch):
     # low over the floor, the rotors lift dust: returns 0.3 m off, in the drone's own voxel, where no
     # beam passes to clear them. Mapped, they made it rock: "trapped", the drone crept round the spot
-    # in the dust for 120-300 s on the way home (hard, 20 m error, notes 13)
+    # in the dust for 120-300 s on the way home (hard, 20 m error)
     from cavesim.api import Observation
     monkeypatch.setattr(P, "SCAN_MATCH", False)
     ag = P.PlannerAgent(0, 1, {"base": [0, 0, 0], "target": None, "lidar_vfov_deg": (-45.0, 45.0), "lidar_min_range": 0.1})
@@ -224,7 +224,7 @@ def test_rotor_dust_does_not_put_rock_where_the_drone_is(monkeypatch):
 def test_guard_lets_the_drone_fly_along_a_slot_it_fits_through(w, off):
     # a 0.4 m drone in a 0.7 m slot: every wall point just ahead counted as rock being closed in on,
     # and the guard cut the command along the slot to nothing -- 240 s wedged, three times in the
-    # search near the survivor (hard, 20 m error, notes 13). Moving along a wall does not close on it.
+    # search near the survivor (hard, 20 m error). Moving along a wall does not close on it.
     from types import SimpleNamespace
     ag = P.PlannerAgent(0, 1, {"base": [0, 0, 0], "target": None, "lidar_vfov_deg": (-45.0, 45.0), "lidar_min_range": 0.1})
     y, z = np.meshgrid(np.arange(-3, 3, 0.05), np.arange(-1, 1, 0.1))
@@ -252,7 +252,7 @@ def test_guard_still_stops_short_of_rock_ahead():
 
 def test_sweep_finds_the_way_on_that_leads_away_from_the_goal():
     # the plan toward the goal never expands the other way: the J1 chamber's exit, east of the drone
-    # with the survivor west, was mapped but never remembered (hard, notes 13.14)
+    # with the survivor west, was mapped but never remembered (hard)
     m = P.VoxelMap()
     for x in np.arange(-15.25, 6.5, P.RES):                       # a tube, 6.5 m on east, 15.5 m west
         for y in (-0.25, 0.25, 0.75):
@@ -280,7 +280,7 @@ def test_a_beam_that_goes_on_clears_the_stale_surface_it_passes():
 
 def test_the_way_home_is_planned_no_further_than_the_course_rule_allows(monkeypatch):
     # past the cave mouth the road runs over the staging area: a plan to a node there fails and its
-    # partial end lay back in the cave (easy 6, notes 13.16)
+    # partial end lay back in the cave (easy 6)
     ag = P.PlannerAgent(0, 1, {"base": [0, 0, 0], "target": None, "lidar_vfov_deg": (-45.0, 45.0), "lidar_min_range": 0.3})
     road = [np.array([x, 0.0, 1.5]) for x in (14.9, 13.1, 10.6, 8.0, 5.4, 2.6, 0.0)]
     monkeypatch.setattr(ag.map, "allowed", lambda k: ag.map.centre(k)[0] > 9.0)
@@ -292,7 +292,7 @@ def test_the_way_home_is_planned_no_further_than_the_course_rule_allows(monkeypa
 
 
 def test_a_climb_that_does_not_happen_maps_the_rock_above_and_stops_the_creep():
-    # creeping up into a ceiling pocket the LiDAR cannot see pinned the drone there 35 s (easy 0, notes 13.19)
+    # creeping up into a ceiling pocket the LiDAR cannot see pinned the drone there 35 s (easy 0)
     from types import SimpleNamespace
     ag = P.PlannerAgent(0, 1, {"base": [0, 0, 0], "target": None, "lidar_vfov_deg": (-45.0, 45.0), "lidar_min_range": 0.3,
                                "max_speed_xy": 3.0, "max_speed_z": 1.5})

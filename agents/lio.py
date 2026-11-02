@@ -32,11 +32,11 @@ walk (config.OdomParams: 0.01 m/sqrt(m) flown, 0.2 % scale, 0.05 m/sqrt(s) while
 here: while our own registration finds a degenerate direction -- and the heading's own walk, 0.0005
 rad/sqrt(s) and 0.002 rad/sqrt(rad turned), which turns everything flown since: 1200 m out and
 back, a degree is 10 m, the larger part by far; left out, the gate dropped right fits on the way
-home and the pose was lost, research_notes 13). So the correction may differ
+home and the pose was lost). So the correction may differ
 from the one the cell was mapped with by no more than GATE_SIGMA of that, plus GATE_SLACK; a registration most of
 its matched cells disagree with is a look-alike wall, not the place we mapped -- dropped. Without
 it, at a multi-level junction a wrong fit taken GAIN at a time slid the pose 14 m in four minutes
-while the odometry stayed within 0.8 m (research_notes 10).
+while the odometry stayed within 0.8 m.
 """
 import numpy as np
 from scipy.spatial import cKDTree
