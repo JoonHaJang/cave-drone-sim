@@ -9,17 +9,11 @@ const $ = (id) => document.getElementById(id);
 // Scales every light; the cave textures read near-black at 1. Override with ?light=N.
 const LIGHT_GAIN = Number(new URLSearchParams(location.search).get("light")) || 5;
 
-// Drone model (glTF, y-up): Sketchfab "Bionic dragonfly four-axis UAV aircraft" by boxgizmo
-// (Sketchfab Standard licence, so not part of the repo). Without it the drones stay spheres.
-const DRONE_MODEL = "/drone_3d_model/scene.gltf";
-const DRONE_SPAN = 0.5;          // m, rotor tip to rotor tip after scaling
-const MODEL_YAW = -Math.PI / 2;  // turns the model's nose onto body +x
+// Drone model (glTF, y-up, metres, nose on +x): our own quadrotor, built by drone_3d_model/build_drone.py.
+// Each rotor is a node named prop_ccw_* / prop_cw_* with its origin on the shaft. Without the file
+// the drones stay spheres.
+const DRONE_MODEL = "/drone_3d_model/drone.glb";
 const FPV_OFFSET = new THREE.Vector3(0.14, 0, 0.03);   // camera position in the body frame
-// The model's two propeller meshes each hold one diagonal pair; the mirrored pair spins the
-// other way, as on a real quadrotor. They are split into one pivot per rotor at load time.
-// GLTFLoader sanitises node names ("Cong5_03 - Default_0" -> "Cong5_03_-_Default_0"), so match prefixes.
-const PROP_MESHES = [[/^Cong5_03/, 1], [/^Symtrie1_03/, -1]];
-const propSpin = (name) => (PROP_MESHES.find(([re]) => re.test(name)) || [null, 0])[1];
 const PROP_SPEED = 45;           // rad/s on screen at hover (real rotors are far faster; this reads as spinning)
 const MIX_TILT = 0.35;           // share of a rotor's thrust the roll/pitch demand may add or take
 const MIX_YAW = 0.25;            // same for the yaw demand
@@ -127,74 +121,12 @@ function setLine(line, pts) {
   if (line.material.isLineDashedMaterial) line.computeLineDistances();
 }
 
-// Split a mesh holding two rotors into two pivots, each spinning about its own hub (mesh-local y).
-function splitRotors(mesh, dir) {
-  const geo = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry;
-  const pos = geo.attributes.position;
-  const nTri = pos.count / 3;
-  const centre = new THREE.Vector3(), tri = [];
-  for (let t = 0; t < nTri; t++) {
-    const c = new THREE.Vector3();
-    for (let k = 0; k < 3; k++) c.add(new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k));
-    tri.push(c.divideScalar(3));
-    centre.add(c);
-  }
-  centre.divideScalar(nTri);
-  // The two rotors sit on a diagonal: split along the direction from the centre to the farthest triangle.
-  const axis = tri.reduce((a, c) => (c.distanceTo(centre) > a.distanceTo(centre) ? c : a)).clone().sub(centre);
-  const groups = [[], []];
-  tri.forEach((c, t) => groups[c.clone().sub(centre).dot(axis) > 0 ? 0 : 1].push(t));
-  for (const ids of groups) {
-    const g = new THREE.BufferGeometry();
-    for (const name of Object.keys(geo.attributes)) {
-      const src = geo.attributes[name], n = src.itemSize;
-      const out = new Float32Array(ids.length * 3 * n);
-      ids.forEach((t, i) => { for (let k = 0; k < 3 * n; k++) out[i * 3 * n + k] = src.array[3 * t * n + k]; });
-      g.setAttribute(name, new THREE.BufferAttribute(out, n));
-    }
-    // Hub = area-weighted centroid: a three-blade rotor is symmetric about its shaft, so this lands
-    // exactly on the motor axis (its bounding-box centre is off by ~4 % of the span).
-    const hub = new THREE.Vector3(), a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
-    let area = 0;
-    const P = g.attributes.position;
-    for (let t = 0; t < P.count; t += 3) {
-      a.fromBufferAttribute(P, t); b.fromBufferAttribute(P, t + 1); c.fromBufferAttribute(P, t + 2);
-      const w = b.clone().sub(a).cross(c.clone().sub(a)).length();
-      hub.addScaledVector(a.clone().add(b).add(c), w / 3);
-      area += w;
-    }
-    hub.divideScalar(area);
-    g.translate(-hub.x, -hub.y, -hub.z);
-    const pivot = new THREE.Object3D();
-    pivot.position.copy(hub);
-    pivot.userData.spin = dir;
-    pivot.add(new THREE.Mesh(g, mesh.material));
-    mesh.add(pivot);
-  }
-  mesh.geometry = new THREE.BufferGeometry();     // the pivots carry the rotors now
-}
-
 function loadDroneModel() {
   new GLTFLoader().load(DRONE_MODEL, (gltf) => {
     const m = gltf.scene;
-    const props = [];
-    m.traverse((o) => { if (o.isMesh && propSpin(o.name)) props.push(o); });
-    props.forEach((o) => splitRotors(o, propSpin(o.name)));
-    if (props.length !== 2) console.warn(`drone model: found ${props.length} of 2 propeller meshes; rotors will not spin`);
-    console.log(`drone model: ${props.length} propeller meshes split into ${2 * props.length} rotors`);
-    m.rotation.x = Math.PI / 2;                 // glTF y-up -> z-up
-    const wrap = new THREE.Group();
-    wrap.add(m);
-    wrap.rotation.z = MODEL_YAW;
-    const holder = new THREE.Group();
-    holder.add(wrap);
-    holder.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(holder);
-    const size = box.getSize(new THREE.Vector3());
-    const s = DRONE_SPAN / Math.max(size.x, size.y);
-    holder.scale.setScalar(s);
-    holder.position.copy(box.getCenter(new THREE.Vector3()).multiplyScalar(-s));
-    droneModel = holder;
+    m.traverse((o) => { const r = /^prop_(c?cw)_/.exec(o.name); if (r) o.userData.spin = r[1] === "ccw" ? 1 : -1; });
+    m.rotation.x = Math.PI / 2;                 // glTF y-up -> z-up; a rotor's local y stays its shaft
+    droneModel = new THREE.Group().add(m);
     drones.forEach(attachModel);
   }, undefined, () => console.warn(`drone model not found at ${DRONE_MODEL}; drawing spheres`));
 }

@@ -209,7 +209,13 @@ python -m cavesim.run --agent agents.team1_pid --map rescue_easy --drones 1 --li
 
 ### 3-4. 드론 3D 모델
 
-드론은 `drone_3d_model/scene.gltf`의 3D 모델로 그려집니다. 모델은 Sketchfab의 "Bionic dragonfly four-axis UAV aircraft"(작성자 boxgizmo, Sketchfab Standard 라이선스)이고 저장소에 들어 있습니다. 출처는 `drone_3d_model/license.txt`에 있습니다. 모델 파일이 없으면 드론이 색 공으로 그려지고, 시뮬레이션과 채점은 똑같습니다.
+드론은 `drone_3d_model/drone.glb`로 그려집니다. 이 프로젝트에서 Blender로 직접 만든 모델이라 외부 라이선스 제약이 없습니다(CC0). 치수는 시뮬레이터의 기체 사양(`cavesim/config.py`)과 같고, 앞쪽 팔과 프로펠러 가드가 주황색이라 기수 방향이 보입니다. 모양을 바꾸려면 `drone_3d_model/build_drone.py`를 고친 뒤 다시 만듭니다.
+
+```
+"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python drone_3d_model/build_drone.py
+```
+
+모델 파일이 없으면 드론이 색 공으로 그려지고, 시뮬레이션과 채점은 똑같습니다.
 
 0.5 m짜리 모델은 멀리서는 거의 보이지 않아서, 카메라가 7 m보다 멀어지면 색 공과 방향 원뿔이 같이 그려집니다.
 
@@ -395,7 +401,7 @@ tests/          자동 테스트 (pytest)
 | `conda env create`가 `conda-launchers` 관련 오류로 실패 | conda 26.x의 버그입니다. `mamba env create`를 쓰세요. 설치 스크립트는 이미 mamba를 씁니다. |
 | Python이 아무 메시지 없이 종료됨 (Windows 오류 코드 `0xC06D007F`) | numpy가 MKL 2026.x를 쓰면 일부 PC에서 행렬 곱셈 중에 죽습니다. `environment.yml`이 OpenBLAS로 고정해 두었으니 `mamba env update -n cave-drone -f environment.yml -y`로 다시 맞추세요. |
 | 뷰어가 "연결 끊김" | 실행기(`python -m cavesim.run`)가 꺼졌습니다. 터미널의 오류를 확인하세요. |
-| 드론이 모델이 아니라 색 공으로 보임 | `drone_3d_model/scene.gltf`와 `scene.bin`이 있는지 확인하세요. [3-4](#3-4-드론-3d-모델)를 보세요. |
+| 드론이 모델이 아니라 색 공으로 보임 | `drone_3d_model/drone.glb`가 있는지 확인하세요. [3-4](#3-4-드론-3d-모델)를 보세요. |
 | 뷰어 시간이 실제 시간보다 느리게 감 | 에이전트 계산이 0.1 s 안에 끝나지 않으면 시뮬레이션이 그만큼 느려집니다. vDEMO는 2~3배 느립니다. `--headless`로 돌린 뒤 뷰어 아래 리플레이를 4×, 16×로 보거나, 내 에이전트의 `step()`을 가볍게 만드세요. |
 | 동굴 벽이 너무 어둡거나 밝음 | 뷰어 주소 끝에 `&light=N`을 붙여 조명 배율을 바꿉니다(기본 5). |
 | 키보드로 드론이 안 움직임 | 뷰어 창을 한 번 클릭해 키 입력을 받게 하세요. `agents.manual`로 실행했는지도 확인하세요. 다른 에이전트는 키를 무시합니다. |
