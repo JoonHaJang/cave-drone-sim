@@ -1,32 +1,30 @@
 """Builds drone_3d_model/drone.glb, the viewer's quadrotor, from scratch in Blender.
 Made for this project, not derived from any third-party model; released under CC0 1.0.
 
-    "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe" --background --factory-startup --python drone_3d_model/build_drone.py
+    "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python drone_3d_model/build_drone.py
 
-The layout follows the collision-tolerant cave scouts of the DARPA SubT Challenge (e.g. CERBERUS's
-RMF-Owl, arXiv 2202.11055): a quad-X inside a horizontal bumper ring, a vertical hoop over the top
-and under the belly, frames cut from carbon-foam sandwich plate (black skins, tan core on the cut
-edges), the front left open for the camera. Sizes follow cavesim/config.py (DroneParams.arm,
-LidarParams.prop_z / prop_r / mount_z), in metres, Blender z-up with the nose on +x (the exporter
-writes glTF y-up; the viewer turns it back). The LiDAR puck is not part of the model: the viewer
-draws it where the simulator mounts it, under the belly, inside the hoop.
+A research quad-X of the kind university labs fly: carbon tube arms out from a stacked plate body,
+a landing leg straight down from each motor, a stereo camera bar on the nose, the battery box under
+the belly, two-blade props. No GPS mast: there is no GPS underground. Sizes follow cavesim/config.py
+(DroneParams.arm, LidarParams.prop_z / prop_r), in metres, Blender z-up with the nose on +x (the
+exporter writes glTF y-up; the viewer turns it back). The LiDAR puck is not part of the model: the
+viewer draws it where the simulator mounts it, under the belly, and the legs reach just past it
+(longer than the 0.18 m collision body: drawing only).
 
 Each rotor is its own object named prop_ccw_* / prop_cw_* (seen from above), origin on the motor
 shaft, so the viewer can spin it about its local up axis. PX4 quad-X order: front-right and
-rear-left turn counter-clockwise.
+rear-left turn counter-clockwise. Red lights on the front arms, green on the rear, mark the heading.
 """
 import math
 from pathlib import Path
 
-import bmesh
 import bpy
 
 ARM = 0.177              # m, motor to centre
 PROP_R = 0.073           # m, blade tip radius (tips 0.25 m from the centre)
 PROP_Z = 0.03            # m, rotor plane above the body centre
-RING_R = 0.265           # m, bumper ring centre line, just outside the rotor tips
-HOOP_Z = 0.19            # m, hoop half height: clears the LiDAR puck under the belly (mount_z -0.13)
-PLATE = 0.010            # m, sandwich plate thickness
+TUBE_R = 0.009           # m, arm tube radius
+FOOT_Z = -0.17           # m, feet just below the LiDAR puck the viewer hangs at mount_z -0.13
 OUT = Path(__file__).resolve().parent / "drone.glb"
 
 
@@ -70,45 +68,14 @@ def cyl(name, r, h, loc, mat, rot=(0, 0, 0), n=32):
     return finish(bpy.context.object, name, mat)
 
 
-def band(name, loop, width, thick, axis, skin, core):
-    """A closed band cut from sandwich plate. loop(u) gives (centre, in-plane outward normal) for
-    u in [0, 1) (the normal need not be unit); the plate is `width` wide in the plane and `thick` along `axis` (its normal).
-    The two broad faces are carbon skin, the cut edges show the foam core."""
-    n = 96
-    bm = bmesh.new()
-    rings = []
-    for k in range(n):
-        c, o = loop(k / n)
-        o = [x / math.hypot(*o) for x in o]
-        rings.append([bm.verts.new([c[i] + o[i] * dw + axis[i] * dt for i in range(3)])
-                      for dw, dt in ((width / 2, thick / 2), (-width / 2, thick / 2),
-                                     (-width / 2, -thick / 2), (width / 2, -thick / 2))])
-    for k in range(n):
-        a, b = rings[k], rings[(k + 1) % n]
-        for j in range(4):
-            f = bm.faces.new((a[j], b[j], b[(j + 1) % 4], a[(j + 1) % 4]))
-            f.material_index = 0 if j in (0, 2) else 1      # j = 0, 2: broad faces; 1, 3: cut edges
-    me = bpy.data.meshes.new(name)
-    bm.normal_update()
-    bm.to_mesh(me)
-    bm.free()
-    obj = bpy.data.objects.new(name, me)
-    bpy.context.collection.objects.link(obj)
-    bpy.context.view_layer.objects.active = obj
-    obj.select_set(True)
-    me.materials.append(skin)
-    me.materials.append(core)
-    return obj
-
-
 def rotor(name, loc, ccw, mat):
-    """Three twisted blades, origin on the shaft; the leading edge is higher, as on a real prop."""
+    """Two twisted blades, origin on the shaft; the leading edge is higher, as on a real prop."""
     parts = []
-    for k in range(3):
-        a = 2 * math.pi * k / 3
+    for k in range(2):
+        a = math.pi * k
         bpy.ops.mesh.primitive_cube_add(size=1)
         b = bpy.context.object
-        b.scale = (PROP_R - 0.008, 0.016, 0.002)
+        b.scale = (PROP_R - 0.008, 0.013, 0.002)
         b.location = ((PROP_R + 0.008) / 2, 0, 0)
         b.rotation_euler = (math.radians(14) * (1 if ccw else -1), 0, 0)
         bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
@@ -132,51 +99,60 @@ def rotor(name, loc, ccw, mat):
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
 carbon = material("carbon", (0.03, 0.032, 0.036), metal=0.2, rough=0.3)
-foam = material("foam", (0.62, 0.48, 0.32), rough=0.85)                # tan core on the cut edges
-accent = material("accent", (0.95, 0.40, 0.04), rough=0.4)             # front props and arm tips: heading
-prop_rear = material("prop_rear", (0.70, 0.72, 0.75), rough=0.4)
+plastic = material("plastic", (0.06, 0.06, 0.065), rough=0.6)
+rubber = material("rubber", (0.02, 0.02, 0.02), rough=0.9)
+prop_m = material("prop", (0.05, 0.05, 0.055), rough=0.35)
 motor = material("motor", (0.08, 0.08, 0.09), metal=0.8, rough=0.3)
 bell = material("bell", (0.75, 0.76, 0.78), metal=0.9, rough=0.25)
 board = material("board", (0.10, 0.25, 0.12), rough=0.6)
 battery_m = material("battery", (0.12, 0.13, 0.15), rough=0.55)
 alu = material("alu", (0.62, 0.64, 0.67), metal=0.85, rough=0.35)
+cam_body = material("cam_body", (0.80, 0.81, 0.83), metal=0.6, rough=0.3)
 lens = material("lens", (0.01, 0.01, 0.015), metal=0.5, rough=0.05)
-lamp = material("lamp", (1.0, 0.96, 0.88), emit=6.0)
+red = material("led_red", (1.0, 0.05, 0.03), emit=8.0)
+green = material("led_green", (0.1, 1.0, 0.2), emit=8.0)
 
-# Frame: centre plate and X arms out to the bumper ring, all sandwich plate.
-box("centre_plate", (0.13, 0.10, PLATE), (0, 0, 0), carbon, bevel=0.002)
-for name, ang in (("fr", -45), ("fl", 45), ("rl", 135), ("rr", -135)):
-    a = math.radians(ang)
-    box(f"arm_{name}", (RING_R, 0.022, PLATE), (RING_R / 2 * math.cos(a), RING_R / 2 * math.sin(a), 0), carbon,
-        rot=(0, 0, a))
-band("ring", lambda u: ((RING_R * math.cos(2 * math.pi * u), RING_R * math.sin(2 * math.pi * u), 0.0),
-                        (math.cos(2 * math.pi * u), math.sin(2 * math.pi * u), 0.0)),
-     0.024, PLATE, (0, 0, 1), carbon, foam)
-# Hoop across the drone (y-z plane), the nose and tail left open for the camera.
-band("hoop", lambda u: ((0.0, RING_R * math.cos(2 * math.pi * u), HOOP_Z * math.sin(2 * math.pi * u)),
-                        (0.0, math.cos(2 * math.pi * u) / RING_R, math.sin(2 * math.pi * u) / HOOP_Z)),  # ellipse normal
-     0.020, PLATE, (1, 0, 0), carbon, foam)
+# Body: two carbon plates on standoffs, the flight controller and companion computer stacked on top.
+box("plate_low", (0.13, 0.13, 0.004), (0, 0, -0.008), carbon, bevel=0.002)
+box("plate_high", (0.11, 0.11, 0.004), (0, 0, 0.012), carbon, bevel=0.002)
+for sx in (-0.045, 0.045):
+    for sy in (-0.045, 0.045):
+        cyl(f"standoff_{sx}_{sy}", 0.0025, 0.020, (sx, sy, 0.002), alu, n=8)
+box("stack_fc", (0.045, 0.045, 0.012), (-0.01, 0, 0.020), plastic, bevel=0.002)
+box("stack_pc", (0.085, 0.060, 0.004), (-0.01, 0, 0.034), board)
+box("stack_pc_sink", (0.050, 0.045, 0.010), (-0.015, 0, 0.041), alu, bevel=0.001)
+box("battery", (0.11, 0.07, 0.045), (-0.005, 0, -0.035), battery_m, bevel=0.004)
+# Nose: stereo camera bar on a bracket.
+box("cam_bracket", (0.020, 0.040, 0.004), (0.060, 0, 0.016), alu)
+box("cam_bar", (0.026, 0.120, 0.024), (0.072, 0, 0.030), cam_body, bevel=0.005)
+for sy in (-0.040, 0.040):
+    cyl(f"cam_lens_{sy}", 0.008, 0.004, (0.0855, sy, 0.030), lens, rot=(0, math.pi / 2, 0))
 
-# Hull: battery under the plate, flight controller and companion computer stacked on top.
-box("battery", (0.12, 0.045, 0.032), (-0.01, 0, -0.022), battery_m, bevel=0.004)
-box("stack_fc", (0.040, 0.040, 0.004), (-0.005, 0, 0.012), board)
-box("stack_pc", (0.080, 0.058, 0.004), (-0.01, 0, 0.026), board)
-for sx in (-0.045, 0.025):
-    for sy in (-0.024, 0.024):
-        cyl(f"standoff_{sx}_{sy}", 0.0025, 0.026, (sx, sy, 0.018), alu, n=8)
-# Front: camera block on the plate's nose, LED above it.
-box("camera", (0.030, 0.030, 0.030), (0.085, 0, -0.012), alu, bevel=0.002)
-cyl("camera_lens", 0.010, 0.016, (0.106, 0, -0.012), lens, rot=(0, math.pi / 2, 0))
-box("led", (0.012, 0.030, 0.012), (0.075, 0, 0.012), alu, bevel=0.002)
-cyl("led_face", 0.008, 0.003, (0.0815, 0, 0.012), lamp, rot=(0, math.pi / 2, 0))
-
-# Motors and rotors on the X diagonals.
+# Arms, motors, legs and rotors on the X diagonals.
 for name, ang, ccw in (("fr", -45, True), ("fl", 45, False), ("rl", 135, True), ("rr", -135, False)):
     a = math.radians(ang)
-    cx, cy = ARM * math.cos(a), ARM * math.sin(a)
-    cyl(f"motor_{name}", 0.0135, 0.014, (cx, cy, PLATE / 2 + 0.007), motor)
-    cyl(f"bell_{name}", 0.014, 0.006, (cx, cy, PLATE / 2 + 0.017), bell)
-    rotor(f"prop_{'ccw' if ccw else 'cw'}_{name}", (cx, cy, PROP_Z), ccw, accent if name[0] == "f" else prop_rear)
+    c, s = math.cos(a), math.sin(a)
+    cx, cy = ARM * c, ARM * s
+    r0 = 0.055                                            # tube leaves the body here
+    cyl(f"arm_{name}", TUBE_R, ARM - r0, ((ARM + r0) / 2 * c, (ARM + r0) / 2 * s, 0), carbon,
+        rot=(0, math.pi / 2, a))
+    box(f"arm_clamp_{name}", (0.022, 0.026, 0.024), (r0 * c, r0 * s, 0), plastic, rot=(0, 0, a), bevel=0.002)
+    box(f"motor_mount_{name}", (0.034, 0.030, 0.012), (cx, cy, 0), plastic, rot=(0, 0, a), bevel=0.002)
+    cyl(f"motor_{name}", 0.0135, 0.012, (cx, cy, 0.012), motor)
+    cyl(f"bell_{name}", 0.014, 0.005, (cx, cy, 0.0205), bell)
+    rotor(f"prop_{'ccw' if ccw else 'cw'}_{name}", (cx, cy, PROP_Z), ccw, prop_m)
+    leg = (-0.006 - FOOT_Z - 0.012)                       # mount bottom to the foot pad top
+    cyl(f"leg_{name}", 0.0065, leg, (cx, cy, -0.006 - leg / 2), carbon)
+    cyl(f"foot_{name}", 0.010, 0.016, (cx, cy, FOOT_Z + 0.008), rubber)
+    # Brace from the leg's middle back up to the arm, as on the folding legs of a lab quad.
+    m, k = (cx, cy, -0.006 - leg / 2), 0.11
+    t = (k * c, k * s, 0)
+    d = [t[i] - m[i] for i in range(3)]
+    ln = math.sqrt(sum(x * x for x in d))
+    cyl(f"brace_{name}", 0.0045, ln, tuple((m[i] + t[i]) / 2 for i in range(3)), carbon,
+        rot=(0, math.acos(d[2] / ln), a + math.pi))
+    box(f"led_{name}", (0.010, 0.010, 0.006), ((ARM - 0.025) * c, (ARM - 0.025) * s, -0.011),
+        red if name[0] == "f" else green)
 
 bpy.ops.export_scene.gltf(filepath=str(OUT), export_format="GLB", export_yup=True, export_apply=True)
 print("wrote", OUT, OUT.stat().st_size, "bytes")

@@ -209,7 +209,7 @@ python -m cavesim.run --agent agents.team1_pid --map rescue_easy --drones 1 --li
 
 ### 3-4. 드론 3D 모델
 
-드론은 `drone_3d_model/drone.glb`로 그려집니다. 이 프로젝트에서 Blender로 직접 만든 모델이라 외부 라이선스 제약이 없습니다(CC0). 모양은 DARPA SubT 동굴 탐사 드론(CERBERUS 팀의 RMF-Owl 등)처럼 수평 범퍼 링과 세로 고리가 기체를 감싸는 충돌 내성 구조이고, 치수는 시뮬레이터의 기체 사양(`cavesim/config.py`)과 같습니다. 앞쪽 프로펠러가 주황색이라 기수 방향이 보입니다. 모양을 바꾸려면 `drone_3d_model/build_drone.py`를 고친 뒤 다시 만듭니다.
+드론은 `drone_3d_model/drone.glb`로 그려집니다. 이 프로젝트에서 Blender로 직접 만든 모델이라 외부 라이선스 제약이 없습니다(CC0). 모양은 대학 연구실에서 흔히 쓰는 연구용 쿼드콥터입니다. 원통형 카본 팔, 모터 밑 착륙 다리, 앞쪽 스테레오 카메라, 배 밑 배터리가 있고, 지하라 GPS 안테나는 없습니다. 치수는 시뮬레이터의 기체 사양(`cavesim/config.py`)과 같습니다(다리만 LiDAR 퍽보다 길게 그렸습니다). 앞 팔에 빨간 등, 뒤 팔에 초록 등이 있어 기수 방향이 보입니다. 모양을 바꾸려면 `drone_3d_model/build_drone.py`를 고친 뒤 다시 만듭니다.
 
 ```
 "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --factory-startup --python drone_3d_model/build_drone.py
