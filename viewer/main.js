@@ -3,128 +3,469 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { Line2 } from "three/addons/lines/Line2.js";
+import { LineGeometry } from "three/addons/lines/LineGeometry.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 
+// ---------------------------------------------------------------- constants
 const COLORS = [0xff6b6b, 0x4dabf7, 0x69db7c, 0xffd43b, 0xda77f2, 0xff922b, 0x38d9a9, 0xf783ac, 0xa9e34b];
-const $ = (id) => document.getElementById(id);
-// Scales every light; the cave textures read near-black at 1. Override with ?light=N.
-const LIGHT_GAIN = Number(new URLSearchParams(location.search).get("light")) || 5;
-
-// Drone model (glTF, y-up): Sketchfab "Bionic dragonfly four-axis UAV aircraft" by boxgizmo
-// (Sketchfab Standard licence, so not part of the repo). Without it the drones stay spheres.
+const ARTIFACTS = {
+  survivor: { name: "Survivor", color: 0xff6b6b },
+  backpack: { name: "Backpack", color: 0xff922b },
+  phone: { name: "Phone", color: 0x4dabf7 },
+  helmet: { name: "Helmet", color: 0xffd43b },
+  rope: { name: "Rope", color: 0xda77f2 },
+};
+const DRONE_SCALE = 1.6;                    // drawn bigger than the 0.2 m collision sphere so it reads from afar
+// Drone model (glTF, y-up): Sketchfab "Bionic dragonfly four-axis UAV aircraft" by boxgizmo, Sketchfab
+// Standard licence (drone_3d_model/license.txt). Without it the drones keep the drawn shape.
 const DRONE_MODEL = "/drone_3d_model/scene.gltf";
-const DRONE_SPAN = 0.5;          // m, rotor tip to rotor tip after scaling
+const DRONE_SPAN = 0.56;         // rotor tip to rotor tip in the model frame, like the drawn shape (x DRONE_SCALE)
 const MODEL_YAW = -Math.PI / 2;  // turns the model's nose onto body +x
-const FPV_OFFSET = new THREE.Vector3(0.14, 0, 0.03);   // camera position in the body frame
-// The model's two propeller meshes each hold one diagonal pair; the mirrored pair spins the
-// other way, as on a real quadrotor. They are split into one pivot per rotor at load time.
+// The model's two propeller meshes each hold one diagonal pair; the mirrored pair spins the other way.
 // GLTFLoader sanitises node names ("Cong5_03 - Default_0" -> "Cong5_03_-_Default_0"), so match prefixes.
 const PROP_MESHES = [[/^Cong5_03/, 1], [/^Symtrie1_03/, -1]];
 const propSpin = (name) => (PROP_MESHES.find(([re]) => re.test(name)) || [null, 0])[1];
 const PROP_SPEED = 45;           // rad/s on screen at hover (real rotors are far faster; this reads as spinning)
 const MIX_TILT = 0.35;           // share of a rotor's thrust the roll/pitch demand may add or take
 const MIX_YAW = 0.25;            // same for the yaw demand
+const MAP_MAX = 400_000, MAP_VOXEL = 0.3;   // accumulated LiDAR map: at most one point per 30 cm voxel
+const FOG = { outside: 0.004, inside: 0.06 };
+const LAMP = 30;                           // headlamp candela; walls 2 m away should stay under the bloom threshold
+const HOLO = [0x8b5cf6, 0x3b82f6, 0x22d3ee].map((c) => new THREE.Color(c));    // cave tint, low -> high
+const MAP_RAMP = [0xd9480f, 0xf59f00, 0xfff3bf].map((c) => new THREE.Color(c)); // mapped surface tint
+// SubT maps ship PBR rock textures in maps/<name>/textures/<set>_{Albedo,Normal,Roughness}.jpg,
+// and their cave.glb names each mesh's material after its texture set.
+const ROCK_TEXTURES = ["CaveWall", "StriatedRock", "RockPile", "Grass", "Gravel"];
+const DAY_SKY = new THREE.Color(0x9fb3c8);
+const PARAMS = new URLSearchParams(location.search);
+// ?light=N scales every light, as in the stock viewer; 5 is the default there and is our tuned look.
+const LIGHT_GAIN = (Number(PARAMS.get("light")) || 5) / 5;
 
-// ---------------------------------------------------------------- scene
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
+const $ = (id) => document.getElementById(id);
+const on = (id) => $(id).checked;
+const hex = (c) => "#" + c.toString(16).padStart(6, "0");
+const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
+const damp = (dt, rate) => 1 - Math.exp(-rate * dt);          // frame-rate independent lerp factor
+const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+function ramp(stops, h, out) {
+  const x = THREE.MathUtils.clamp(h, 0, 1) * (stops.length - 1);
+  const k = Math.min(Math.floor(x), stops.length - 2);
+  return out.lerpColors(stops[k], stops[k + 1], x - k);
+}
+
+// ---------------------------------------------------------------- renderer, camera, post
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
 renderer.setSize(innerWidth, innerHeight);
-renderer.autoClear = false;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
 document.body.prepend(renderer.domElement);
 
-const scene = new THREE.Scene();
-const SKY = new THREE.Color(0x0d1014);
-// Fog is always present so materials never recompile; the overview pushes it out of reach.
-scene.fog = new THREE.Fog(0x000000, 1e5, 1e5 + 1);
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(innerWidth, innerHeight);
+labelRenderer.domElement.id = "labels";
+renderer.domElement.after(labelRenderer.domElement);
 
-const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 2000);
+const scene = new THREE.Scene();
+const BACKDROP = backdrop();
+scene.background = BACKDROP;
+scene.fog = new THREE.FogExp2(0x05080d, FOG.outside);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.05, 2000);
 camera.up.set(0, 0, 1);
 camera.position.set(-30, -60, 70);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(40, 0, 0);
-controls.update();
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
 
-// First-person camera, rigidly mounted on the selected drone. Camera looks down its -z,
-// so its basis in the body frame is right = -y, up = +z, back = -x.
-const fpvCam = new THREE.PerspectiveCamera(78, 16 / 9, 0.03, 120);
-const CAM_IN_BODY = new THREE.Quaternion().setFromRotationMatrix(
-  new THREE.Matrix4().makeBasis(new THREE.Vector3(0, -1, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(-1, 0, 0)));
-// Onboard LEDs: a wide flood plus a narrow spot, both bolted to the camera.
-const flood = new THREE.SpotLight(0xfff4e0, 0, 45, Math.PI / 3, 0.8, 1.6);
-const beam = new THREE.SpotLight(0xffffff, 0, 60, Math.PI / 9, 0.5, 1.4);
-for (const l of [flood, beam]) {
-  l.position.set(0, 0, -0.35);   // a little ahead of the nose, so the drone does not light itself
-  l.target.position.set(0, 0, -1);
-  fpvCam.add(l, l.target);
-}
-scene.add(fpvCam);
+const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 }));
+composer.setPixelRatio(renderer.getPixelRatio());
+composer.setSize(innerWidth, innerHeight);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.6, 0.45, 0.72);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
 
-// Third-person chase camera: behind and above the selected drone, swinging with its heading.
-const chaseCam = new THREE.PerspectiveCamera(70, 16 / 9, 0.05, 300);
-chaseCam.up.set(0, 0, 1);
-// Where the chase camera sits, relative to the drone's heading: drag to orbit, wheel to zoom,
-// double-click to reset. yaw 0 = straight behind; pitch = elevation above the drone.
-const CHASE_DEFAULT = { yaw: 0, pitch: Math.atan2(0.9, 2.2), dist: Math.hypot(2.2, 0.9) };
-const chase = { ...CHASE_DEFAULT };
-const chaseRay = new THREE.Raycaster();
-// SubT worlds start outside the cave mouth: under open sky the camera views use daylight,
-// under rock they use darkness and the drone's lights. `daylight` eases between 0 and 1.
-const roofRay = new THREE.Raycaster(undefined, undefined, 0, 60);
-// Upper-hemisphere directions for "how much sky can the camera see": straight up, 8 at 45 deg, 4 at 20 deg.
-const SKY_DIRS = [new THREE.Vector3(0, 0, 1)];
-for (let k = 0; k < 8; k++) SKY_DIRS.push(new THREE.Vector3().setFromSphericalCoords(1, Math.PI / 4, k * Math.PI / 4));
-for (let k = 0; k < 4; k++) SKY_DIRS.push(new THREE.Vector3().setFromSphericalCoords(1, 7 * Math.PI / 18, k * Math.PI / 2 + Math.PI / 4));
-SKY_DIRS.forEach((d) => d.set(d.x, d.z, d.y));   // three's spherical coords are y-up; ours are z-up
-let skyOpen = 0, skyCheckIn = 0;
-const DAY_SKY = new THREE.Color(0x9fb3c8);
-let daylight = 0;
-
-const hemi = new THREE.HemisphereLight(0xcfd8e3, 0x302820, 1.4 * LIGHT_GAIN);
-const sun = new THREE.DirectionalLight(0xffffff, 1.2 * LIGHT_GAIN);
+const LIGHT = { hemi: 1.1 * LIGHT_GAIN, sun: 1.6 * LIGHT_GAIN, lamp: LAMP * LIGHT_GAIN };
+const hemi = new THREE.HemisphereLight(0xbcd2ff, 0x2a1d14, LIGHT.hemi);
+const sun = new THREE.DirectionalLight(0xfff0dd, LIGHT.sun);
 sun.position.set(30, -40, 80);
 scene.add(hemi, sun);
 
 addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+  labelRenderer.setSize(innerWidth, innerHeight);
 });
 
+// ---------------------------------------------------------------- textures
+function canvasTexture(size, paint) {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  paint(c.getContext("2d"), size);
+  return new THREE.CanvasTexture(c);
+}
+
+function backdrop() {
+  const t = canvasTexture(512, (g, s) => {
+    const grd = g.createRadialGradient(s / 2, s * 0.35, 10, s / 2, s * 0.6, s * 0.85);
+    grd.addColorStop(0, "#15233a");
+    grd.addColorStop(0.5, "#090e17");
+    grd.addColorStop(1, "#020306");
+    g.fillStyle = grd;
+    g.fillRect(0, 0, s, s);
+  });
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+const dot = (hard) => canvasTexture(64, (g, s) => {
+  const grd = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  grd.addColorStop(0, "rgba(255,255,255,1)");
+  grd.addColorStop(hard ? 0.6 : 0.2, hard ? "rgba(255,255,255,1)" : "rgba(255,255,255,.5)");
+  grd.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grd;
+  g.fillRect(0, 0, s, s);
+});
+const DOT = dot(true), GLOW = dot(false);
+
+// ---------------------------------------------------------------- cave materials
+const caveU = {
+  uTime: { value: 0 }, uOpacity: { value: 0.7 },
+  uZ: { value: new THREE.Vector2(-12, 9) }, uBase: { value: new THREE.Vector3() },
+};
+
+// Hologram: glowing silhouettes tinted by height, contour lines, and a sonar ping from the base.
+const holoMat = new THREE.ShaderMaterial({
+  uniforms: { ...caveU, uC0: { value: HOLO[0] }, uC1: { value: HOLO[1] }, uC2: { value: HOLO[2] } },
+  vertexShader: /* glsl */ `
+    varying vec3 vW; varying vec3 vN;
+    void main() {
+      vec4 w = modelMatrix * vec4(position, 1.0);
+      vW = w.xyz;
+      vN = normalize(mat3(modelMatrix) * normal);
+      gl_Position = projectionMatrix * viewMatrix * w;
+    }`,
+  fragmentShader: /* glsl */ `
+    uniform float uTime, uOpacity; uniform vec2 uZ; uniform vec3 uBase, uC0, uC1, uC2;
+    varying vec3 vW; varying vec3 vN;
+    void main() {
+      float h = clamp((vW.z - uZ.x) / (uZ.y - uZ.x), 0.0, 1.0);
+      vec3 col = h < 0.5 ? mix(uC0, uC1, h * 2.0) : mix(uC1, uC2, h * 2.0 - 1.0);
+      float rim = pow(1.0 - abs(dot(normalize(vN), normalize(cameraPosition - vW))), 2.2);
+      float q = vW.z / 1.5;                                        // contour every 1.5 m of height
+      float contour = 1.0 - smoothstep(0.0, 1.2, abs(fract(q - 0.5) - 0.5) / fwidth(q));
+      float r = mod(uTime * 18.0, 140.0);
+      float ping = exp(-pow((distance(vW.xy, uBase.xy) - r) / 2.0, 2.0)) * (1.0 - r / 140.0);
+      float a = 0.035 + 0.75 * rim + 0.16 * contour + 0.8 * ping;
+      gl_FragColor = vec4(col * (0.6 + 1.6 * ping) + 0.4 * ping, a * uOpacity);
+    }`,
+  transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+});
+
+// Rock: lit stone with procedural grain and faint sediment bands, darker deeper down.
+const NOISE = /* glsl */ `
+  float hash3(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+  float noise3(vec3 x) {
+    vec3 i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hash3(i), hash3(i + vec3(1, 0, 0)), f.x), mix(hash3(i + vec3(0, 1, 0)), hash3(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(hash3(i + vec3(0, 0, 1)), hash3(i + vec3(1, 0, 1)), f.x), mix(hash3(i + vec3(0, 1, 1)), hash3(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+  }
+`;
+const rockMat = new THREE.MeshStandardMaterial({ roughness: 0.9, side: THREE.DoubleSide, transparent: true, envMapIntensity: 0 });
+rockMat.onBeforeCompile = (s) => {
+  s.uniforms.uZ = caveU.uZ;
+  s.vertexShader = "varying vec3 vRock;\n" + s.vertexShader.replace("#include <begin_vertex>",
+    "#include <begin_vertex>\nvRock = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+  s.fragmentShader = "varying vec3 vRock;\nuniform vec2 uZ;\n" + NOISE + s.fragmentShader.replace("#include <color_fragment>", `
+    #include <color_fragment>
+    float n = 0.55 * noise3(vRock * 0.7) + 0.3 * noise3(vRock * 2.3) + 0.15 * noise3(vRock * 7.1);
+    float h = clamp((vRock.z - uZ.x) / (uZ.y - uZ.x), 0.0, 1.0);
+    vec3 rock = mix(vec3(0.05, 0.045, 0.04), vec3(0.26, 0.2, 0.15), h);
+    rock *= 0.65 + 0.7 * n;
+    rock *= 0.9 + 0.1 * sin(vRock.z * 5.0 + n * 7.0);
+    diffuseColor.rgb = rock;`).replace("#include <normal_fragment_maps>", `
+    #include <normal_fragment_maps>
+    vec3 bp = vRock * 1.8, grad = vec3(0.0);
+    for (int o = 0; o < 2; o++) {                                // two octaves of bump from the noise gradient
+      float b0 = noise3(bp);
+      grad += (vec3(noise3(bp + vec3(0.1, 0, 0)), noise3(bp + vec3(0, 0.1, 0)), noise3(bp + vec3(0, 0, 0.1))) - b0) * (o == 0 ? 4.0 : 2.0);
+      bp *= 3.1;
+    }
+    vec3 gv = mat3(viewMatrix) * grad;
+    normal = normalize(normal - 0.6 * (gv - dot(gv, normal) * normal));`);
+};
+
+// Rock on SubT maps: the world's own textures. Front faces only, as Gazebo draws them: the tiles are
+// hollow tubes whose faces point inward, so from outside their shells stay invisible instead of black.
+const texLoader = new THREE.TextureLoader();
+const texMats = {};
+function texturedRock(map, set) {
+  const tex = (kind, srgb) => {
+    const t = texLoader.load(`/maps/${map}/textures/${set}_${kind}.jpg`);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;           // tile UVs run well past 1
+    t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  return texMats[set] ??= new THREE.MeshStandardMaterial({
+    map: tex("Albedo", true), normalMap: tex("Normal"), roughnessMap: tex("Roughness"),
+    metalness: 0, envMapIntensity: 0, side: THREE.FrontSide, transparent: true,
+  });
+}
+
+// Artifact and base-station models (viewer/assets/<type>.glb, from cavesim.subt_import;
+// Open Robotics on Gazebo Fuel, CC0 / CC BY 4.0). A missing file keeps the drawn shape.
+const assetCache = {};
+function loadAsset(name, onLoad) {
+  assetCache[name] ??= new Promise((res) =>
+    new GLTFLoader().load(`/viewer/assets/${name}.glb`, (g) => res(g.scene), undefined, () => res(null)));
+  assetCache[name].then((m) => m && onLoad(m.clone()));
+}
+
 // ---------------------------------------------------------------- state
-const caveMeshes = [];      // {mesh, over, fpv}: overview (see-through) and FPV (solid) materials
-const caveMats = [];        // see-through materials, driven by the opacity slider
-const artifactMeshes = {};
-const drones = [];          // per drone: {anchor, marker, craft, ghost, lidar, trail, odomTrail, path, goal, pts, pose}
-const overlays = [];        // things the FPV view hides (trails, debug, links, ...)
-let linkLines = null;
-let selected = 0;
-let initMsg = null;
+let initMsg = null, lastState = null, ws = null;
+let cave = null, grid = null, linkLine = null;
+let selected = 0, camMode = "orbit", caveStyle = "holo", saved = null, intro = null;
+let lastPulse = 0;
 let rescue = null;          // mission settings of a rescue course, else null
-let lastState = null;
-let ws = null;
-let droneModel = null;
-let lidarMount = [0, 0, -0.13];   // sensor origin in the body frame (m), from the init message
-let stateDt = 100;          // ms between state messages, smoothed
-let lastStateAt = 0;
+const rescued = new Set();  // drones that reached the survivor
+let lapped = false;
+const drones = [];          // per drone: meshes, lines, smoothed pose, HUD card refs
+const artifactObjs = {};
+const found = new Set();
+let seeded = false;         // first state after connecting only seeds `found`/status, without log spam
+const effects = [];
+const ray = new THREE.Raycaster();
 
-const v3 = (a) => new THREE.Vector3(a[0], a[1], a[2]);
-const EULER = new THREE.Euler(0, 0, 0, "ZYX");
-const quatOf = (yaw, rp) => new THREE.Quaternion().setFromEuler(EULER.set(rp ? rp[0] : 0, rp ? rp[1] : 0, yaw, "ZYX"));
-
-function makeLine(color, dashed = false, opacity = 1) {
-  const mat = dashed
-    ? new THREE.LineDashedMaterial({ color, dashSize: 0.6, gapSize: 0.4, transparent: true, opacity })
-    : new THREE.LineBasicMaterial({ color, transparent: true, opacity });
-  const line = new THREE.Line(new THREE.BufferGeometry(), mat);
+// ---------------------------------------------------------------- helpers
+function makeLine2(color, { width = 2, dashed = false, opacity = 1, vertexColors = false, segments = false } = {}) {
+  const mat = new LineMaterial({ color, linewidth: width, transparent: true, opacity, dashed, vertexColors,
+                                 dashSize: 0.6, gapSize: 0.4, depthWrite: false });
+  const line = segments ? new LineSegments2(new LineSegmentsGeometry(), mat) : new Line2(new LineGeometry(), mat);
   line.frustumCulled = false;
+  line.visible = false;
   scene.add(line);
-  overlays.push(line);
   return line;
 }
 
-function setLine(line, pts) {
-  const flat = new Float32Array(pts.length * 3);
-  pts.forEach((p, i) => flat.set(p, i * 3));
-  line.geometry.setAttribute("position", new THREE.BufferAttribute(flat, 3));
-  line.geometry.computeBoundingSphere();
-  if (line.material.isLineDashedMaterial) line.computeLineDistances();
+function setLine2(line, flat, colors) {
+  line.geometry.dispose();
+  const g = line.isLine2 ? new LineGeometry() : new LineSegmentsGeometry();
+  g.setPositions(flat);
+  if (colors) g.setColors(colors);
+  line.geometry = g;
+  if (line.material.dashed) line.computeLineDistances();
+}
+
+// Points are sized in metres; cap their on-screen size so close-ups don't turn into a wall of discs.
+function capPointSize(mat, px) {
+  const max = (px * renderer.getPixelRatio()).toFixed(1);
+  mat.onBeforeCompile = (s) => {
+    s.vertexShader = s.vertexShader.replace("#include <logdepthbuf_vertex>",
+      `gl_PointSize = min(gl_PointSize, ${max});
+#include <logdepthbuf_vertex>`);
+  };
+  mat.customProgramCacheKey = () => `cap${max}`;
+  return mat;
+}
+
+function makePoints(color, size, map, additive) {
+  const p = new THREE.Points(new THREE.BufferGeometry(), capPointSize(new THREE.PointsMaterial({
+    color, size, map, transparent: true, depthWrite: !additive, alphaTest: additive ? 0 : 0.5,
+    blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+  }), additive ? 6 : 5));
+  p.frustumCulled = false;
+  scene.add(p);
+  return p;
+}
+
+function setPoints(points, flat) {
+  let attr = points.geometry.getAttribute("position");
+  if (!attr || attr.array.length < flat.length) {
+    attr = new THREE.BufferAttribute(new Float32Array(Math.max(flat.length, 3000)), 3).setUsage(THREE.DynamicDrawUsage);
+    points.geometry.setAttribute("position", attr);
+  }
+  attr.array.set(flat);
+  attr.needsUpdate = true;
+  points.geometry.setDrawRange(0, flat.length / 3);
+}
+
+function tag(text, cls, color) {
+  const el = document.createElement("div");
+  el.className = `tag ${cls}`;
+  if (color !== undefined) el.style.setProperty("--c", hex(color));
+  el.textContent = text;
+  return new CSS2DObject(el);
+}
+
+function burst(pos, color, { from = 0.5, to = 6, life = 1.4 } = {}) {
+  const m = new THREE.Mesh(RING, new THREE.MeshBasicMaterial({
+    color, transparent: true, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }));
+  m.position.copy(pos);
+  scene.add(m);
+  effects.push({ m, t: 0, from, to, life });
+}
+const RING = new THREE.RingGeometry(0.9, 1, 64);
+
+// ---------------------------------------------------------------- accumulated LiDAR map
+const mapPos = new Float32Array(MAP_MAX * 3), mapCol = new Float32Array(MAP_MAX * 3);
+const mapGeom = new THREE.BufferGeometry();
+mapGeom.setAttribute("position", new THREE.BufferAttribute(mapPos, 3).setUsage(THREE.DynamicDrawUsage));
+mapGeom.setAttribute("color", new THREE.BufferAttribute(mapCol, 3).setUsage(THREE.DynamicDrawUsage));
+mapGeom.setDrawRange(0, 0);
+const mapCloud = new THREE.Points(mapGeom, capPointSize(new THREE.PointsMaterial({ size: 0.2, vertexColors: true, map: DOT, alphaTest: 0.5 }), 3));
+mapCloud.frustumCulled = false;
+scene.add(mapCloud);
+const mapSeen = new Set();
+let mapCount = 0, mapUploaded = 0;
+const _c = new THREE.Color();
+
+function addToMap(flat) {
+  const z0 = caveU.uZ.value.x, z1 = caveU.uZ.value.y;
+  for (let k = 0; k + 2 < flat.length && mapCount < MAP_MAX; k += 3) {
+    const x = flat[k], y = flat[k + 1], z = flat[k + 2];
+    const key = (Math.round(x / MAP_VOXEL) + 2048) + (Math.round(y / MAP_VOXEL) + 2048) * 4096
+              + (Math.round(z / MAP_VOXEL) + 2048) * 16777216;
+    if (mapSeen.has(key)) continue;
+    mapSeen.add(key);
+    ramp(MAP_RAMP, (z - z0) / (z1 - z0), _c);
+    const o = mapCount * 3;
+    mapPos[o] = x; mapPos[o + 1] = y; mapPos[o + 2] = z;
+    mapCol[o] = _c.r; mapCol[o + 1] = _c.g; mapCol[o + 2] = _c.b;
+    mapCount++;
+  }
+}
+
+function flushMap() {
+  if (mapCount === mapUploaded) return;
+  for (const name of ["position", "color"]) {
+    const a = mapGeom.attributes[name];
+    a.addUpdateRange(mapUploaded * 3, (mapCount - mapUploaded) * 3);
+    a.needsUpdate = true;
+  }
+  mapGeom.setDrawRange(0, mapCount);
+  mapUploaded = mapCount;
+}
+
+// ---------------------------------------------------------------- drones
+const shellMat = new THREE.MeshStandardMaterial({ color: 0x1b222c, metalness: 0.7, roughness: 0.35 });
+const armMat = new THREE.MeshStandardMaterial({ color: 0x2b3440, metalness: 0.5, roughness: 0.5 });
+const rotorMat = new THREE.MeshBasicMaterial({ color: 0xcfe3ff, transparent: true, opacity: 0.14,
+                                               side: THREE.DoubleSide, depthWrite: false });
+const BEAM_LEN = 7;
+const beamGeo = new THREE.ConeGeometry(BEAM_LEN * Math.tan(0.42), BEAM_LEN, 32, 1, true)
+  .rotateZ(Math.PI / 2).translate(BEAM_LEN / 2, 0, 0);       // apex at the nose, opening along +x
+const beamMat = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color(0xfff1dc) } },
+  vertexShader: /* glsl */ `
+    varying float vX; varying vec3 vN; varying vec3 vV;
+    void main() {
+      vX = position.x;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: /* glsl */ `
+    uniform vec3 uColor; varying float vX; varying vec3 vN; varying vec3 vV;
+    void main() {
+      float t = clamp(vX / ${BEAM_LEN.toFixed(1)}, 0.0, 1.0);
+      gl_FragColor = vec4(uColor, 0.11 * pow(1.0 - t, 1.6) * abs(dot(normalize(vN), normalize(vV))));
+    }`,
+  transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+});
+
+function makeDrone(i) {
+  const color = COLORS[i % COLORS.length];
+  const root = new THREE.Group(), tilt = new THREE.Group(), model = new THREE.Group();
+  root.add(tilt);
+  tilt.add(model);
+  tilt.rotation.order = "YXZ";            // root carries yaw, so root * tilt = Rz(yaw) Ry(pitch) Rx(roll)
+  model.scale.setScalar(DRONE_SCALE);
+  const led = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 3 });
+
+  model.add(new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.16, 0.08), shellMat));
+  const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.075, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), led);
+  canopy.rotation.x = Math.PI / 2;
+  canopy.position.z = 0.04;
+  model.add(canopy);
+  for (const a of [Math.PI / 4, -Math.PI / 4]) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.03, 0.025), armMat);
+    arm.rotation.z = a;
+    model.add(arm);
+  }
+  const rotors = [];
+  for (const [x, y] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+    const motor = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.05, 12), armMat);
+    motor.rotation.x = Math.PI / 2;
+    motor.position.set(0.2 * x, 0.2 * y, 0.01);
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(0.13, 28), rotorMat);
+    disc.position.set(0.2 * x, 0.2 * y, 0.045);
+    const rim = new THREE.Mesh(new THREE.RingGeometry(0.122, 0.132, 28), led);
+    rim.position.copy(disc.position);
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.018, 0.004), armMat);
+    blade.position.set(0.2 * x, 0.2 * y, 0.047);
+    model.add(motor, disc, rim, blade);
+    rotors.push({ obj: blade, axis: "z", disc, dir: x * y, x: x / Math.SQRT2, y: y / Math.SQRT2, w: 1 });
+  }
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 6), new THREE.MeshBasicMaterial({ color: 0xfff4e0 }));
+  nose.position.set(0.155, 0, 0);
+  model.add(nose);
+
+  // Lamp ahead of the nose (the model reaches ~0.45 m forward), so the drone does not light itself.
+  const lamp = new THREE.SpotLight(0xfff1dc, LIGHT.lamp, 30, 0.6, 0.55, 2);
+  lamp.position.set(0.55, 0, 0);
+  lamp.target.position.set(6, 0, -0.8);
+  const beam = new THREE.Mesh(beamGeo, beamMat);
+  beam.position.set(0.55, 0, 0);
+  beam.rotation.y = 0.13;
+  tilt.add(lamp, lamp.target, beam);
+
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: GLOW, color, transparent: true, depthWrite: false,
+                                                           depthTest: false, sizeAttenuation: false,
+                                                           blending: THREE.AdditiveBlending }));
+  halo.scale.setScalar(0.05);
+  halo.renderOrder = 10;
+  const label = tag(`D${i}`, "", color);
+  label.position.set(0, 0, 0.9);
+  root.add(halo, label);
+
+  const ghost = new THREE.Mesh(new THREE.IcosahedronGeometry(0.32, 1),
+                               new THREE.MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: 0.5, depthWrite: false }));
+  const errLine = new THREE.Line(new THREE.BufferGeometry().setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3)),
+                                 new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.45 }));
+  errLine.frustumCulled = false;
+  const goal = new THREE.Mesh(new THREE.OctahedronGeometry(0.25), new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true }));
+  scene.add(root, ghost, errLine, goal);
+
+  const g = {
+    i, color, root, tilt, model, led, rotors, lamp, beam, halo, label, ghost, errLine, goal,
+    scan: makePoints(color, 0.16, GLOW, true),
+    pts: makePoints(0xffffff, 0.4, DOT, false),
+    amap: makePoints(0x3bc9db, 0.3, DOT, false),       // the agent's own map (debug "map"), as it sends it
+    trail: makeLine2(0xffffff, { width: 2.5, vertexColors: true, opacity: 0.95 }),
+    odomTrail: makeLine2(color, { width: 1.2, dashed: true, opacity: 0.55 }),
+    path: makeLine2(0xffffff, { width: 1.5, opacity: 0.6 }),
+    target: new THREE.Vector3(), odom: new THREE.Vector3(), hasOdom: true, rp: [0, 0],
+    yaw: 0, targetYaw: 0, lastT: null, status: "flying", alive: true, battery: 1, lowWarned: false,
+    hasTrail: false, mix: null,
+  };
+  droneModel.then((proto) => proto && attachModel(g, proto));
+  return g;
 }
 
 // Split a mesh holding two rotors into two pivots, each spinning about its own hub (mesh-local y).
@@ -174,291 +515,717 @@ function splitRotors(mesh, dir) {
   mesh.geometry = new THREE.BufferGeometry();     // the pivots carry the rotors now
 }
 
-function loadDroneModel() {
-  new GLTFLoader().load(DRONE_MODEL, (gltf) => {
-    const m = gltf.scene;
-    const props = [];
-    m.traverse((o) => { if (o.isMesh && propSpin(o.name)) props.push(o); });
-    props.forEach((o) => splitRotors(o, propSpin(o.name)));
-    if (props.length !== 2) console.warn(`drone model: found ${props.length} of 2 propeller meshes; rotors will not spin`);
-    console.log(`drone model: ${props.length} propeller meshes split into ${2 * props.length} rotors`);
-    m.rotation.x = Math.PI / 2;                 // glTF y-up -> z-up
-    const wrap = new THREE.Group();
-    wrap.add(m);
-    wrap.rotation.z = MODEL_YAW;
-    const holder = new THREE.Group();
-    holder.add(wrap);
-    holder.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(holder);
-    const size = box.getSize(new THREE.Vector3());
-    const s = DRONE_SPAN / Math.max(size.x, size.y);
-    holder.scale.setScalar(s);
-    holder.position.copy(box.getCenter(new THREE.Vector3()).multiplyScalar(-s));
-    droneModel = holder;
-    drones.forEach(attachModel);
-  }, undefined, () => console.warn(`drone model not found at ${DRONE_MODEL}; drawing spheres`));
-}
+// Loaded once; each drone gets a clone. Resolves to null when the file is missing.
+const droneModel = new Promise((res) => new GLTFLoader().load(DRONE_MODEL, (gltf) => {
+  const m = gltf.scene;
+  const props = [];
+  m.traverse((o) => { if (o.isMesh && propSpin(o.name)) props.push(o); });
+  props.forEach((o) => splitRotors(o, propSpin(o.name)));
+  if (props.length !== 2) console.warn(`drone model: found ${props.length} of 2 propeller meshes; rotors will not spin`);
+  m.rotation.x = Math.PI / 2;                 // glTF y-up -> z-up
+  const turn = new THREE.Group();
+  turn.add(m);
+  turn.rotation.z = MODEL_YAW;
+  const holder = new THREE.Group();
+  holder.add(turn);
+  holder.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(holder);
+  const s = DRONE_SPAN / Math.max(box.max.x - box.min.x, box.max.y - box.min.y);
+  holder.scale.setScalar(s);
+  holder.position.copy(box.getCenter(new THREE.Vector3()).multiplyScalar(-s));
+  holder.updateMatrixWorld(true);
+  // Where each rotor sits (body x forward, y left), as a fraction of the span: the mixer's lever arms.
+  const hubs = [];
+  holder.traverse((o) => { if (o.userData.spin) hubs.push([o, o.getWorldPosition(new THREE.Vector3())]); });
+  const span = Math.max(...hubs.map(([, p]) => Math.hypot(p.x, p.y)), 1e-6);
+  hubs.forEach(([o, p]) => { o.userData.x = p.x / span; o.userData.y = p.y / span; });
+  res(holder);
+}, undefined, () => { console.warn(`drone model not found at ${DRONE_MODEL}; keeping the drawn drone`); res(null); }));
 
-function attachModel(g) {
-  if (!droneModel || g.craft.children.length) return;
-  const m = droneModel.clone();
-  g.rotors = [];
-  m.traverse((o) => { if (o.userData.spin) g.rotors.push(o); });
-  g.craft.add(m);
-  g.anchor.updateMatrixWorld(true);
-  const toBody = g.anchor.matrixWorld.clone().invert();
-  const arm = g.rotors.map((r) => r.getWorldPosition(new THREE.Vector3()).applyMatrix4(toBody));
-  const span = Math.max(...arm.map((p) => Math.hypot(p.x, p.y)), 1e-6);
-  g.rotors.forEach((r, k) => { r.userData.x = arm[k].x / span; r.userData.y = arm[k].y / span; r.userData.w = 1; });
-  // Status LED in the drone's colour, so several drones stay apart up close.
-  const led = new THREE.Mesh(new THREE.SphereGeometry(0.025, 10, 8),
-                             new THREE.MeshBasicMaterial({ color: g.color }));
+function attachModel(g, proto) {
+  g.model.clear();
+  g.model.add(proto.clone());
+  const led = new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), g.led);   // status LED in the drone's colour
   led.position.set(-0.12, 0, 0.06);
-  g.craft.add(led);
-  // The LiDAR where the simulator mounts it: an Ouster OS0 puck (87 mm across, 58 mm tall)
-  // with its dark optical window band.
-  const puck = new THREE.Group();
-  const shell = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, metalness: 0.6, roughness: 0.4 });
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.0435, 0.0435, 0.058, 24), shell);
-  const window_ = new THREE.Mesh(new THREE.CylinderGeometry(0.0440, 0.0440, 0.026, 24),
-                                 new THREE.MeshStandardMaterial({ color: 0x111418, metalness: 0.2, roughness: 0.15 }));
-  body.rotation.x = window_.rotation.x = Math.PI / 2;    // cylinders stand on three's y; the body frame is z-up
-  puck.add(body, window_);
-  puck.position.set(...lidarMount);
-  // Standoff from the frame to the puck (the drawn frame is thinner than the 0.18 m hull).
-  const gap = Math.abs(lidarMount[2]) - 0.029;
-  if (gap > 0.005) {
-    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, gap, 10), shell);
-    stem.rotation.x = Math.PI / 2;
-    stem.position.set(lidarMount[0], lidarMount[1], Math.sign(lidarMount[2]) * gap / 2);
-    g.craft.add(stem);
-  }
-  g.craft.add(puck);
-}
-
-// SubT maps ship PBR rock textures in maps/<name>/textures/<set>_{Albedo,Normal,Roughness}.jpg,
-// and their cave.glb names each mesh's material after its texture set.
-const ROCK_TEXTURES = ["CaveWall", "StriatedRock", "RockPile", "Grass", "Gravel"];
-const texLoader = new THREE.TextureLoader();
-
-function rockMaterials(map, set) {
-  const tex = (kind, srgb) => {
-    const t = texLoader.load(`/maps/${map}/textures/${set}_${kind}.jpg`);
-    t.wrapS = t.wrapT = THREE.RepeatWrapping;           // tile UVs run well past 1
-    t.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
-    return t;
-  };
-  const maps = { map: tex("Albedo", true), normalMap: tex("Normal"), roughnessMap: tex("Roughness") };
-  const over = new THREE.MeshStandardMaterial({
-    ...maps, metalness: 0, side: THREE.DoubleSide, fog: false,
-    transparent: true, opacity: $("opacity").value / 100, depthWrite: $("opacity").value > 90,
+  g.model.add(led);
+  g.rotors = [];
+  g.model.traverse((o) => {
+    const u = o.userData;
+    if (u.spin) g.rotors.push({ obj: o, axis: "y", dir: u.spin, x: u.x, y: u.y, w: 1 });
   });
-  caveMats.push(over);
-  // Camera views draw front faces only, as Gazebo does: the tiles are hollow tubes whose faces
-  // point inward, so from the staging area outside their shells stay invisible instead of black.
-  return { over, fpv: new THREE.MeshStandardMaterial({ ...maps, metalness: 0, side: THREE.FrontSide }) };
 }
 
-// Artifact and base-station models (viewer/assets/<type>.glb, from cavesim.subt_import;
-// Open Robotics on Gazebo Fuel, CC0 / CC BY 4.0). Missing files fall back to simple shapes.
-const assetCache = {};
-function loadAsset(name, onLoad) {
-  assetCache[name] ??= new Promise((res) =>
-    new GLTFLoader().load(`/viewer/assets/${name}.glb`, (g) => res(g.scene), undefined, () => res(null)));
-  assetCache[name].then((m) => m && onLoad(m.clone()));
+const selRing = new THREE.Mesh(new THREE.RingGeometry(0.8, 0.9, 48),
+                               new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.8, side: THREE.DoubleSide,
+                                                             depthWrite: false, blending: THREE.AdditiveBlending }));
+scene.add(selRing);
+
+// ---------------------------------------------------------------- base station
+const baseGroup = new THREE.Group(), baseGround = new THREE.Group();   // baseGround sits on the cave floor
+baseGroup.add(baseGround);
+scene.add(baseGroup);
+
+function beaconGeometry(h) {
+  const g = new THREE.CylinderGeometry(0.08, 0.35, h, 24, 1, true).rotateX(Math.PI / 2).translate(0, 0, h / 2);
+  const pos = g.attributes.position, col = new Float32Array(pos.count * 4);
+  for (let k = 0; k < pos.count; k++) col.set([1, 1, 1, 0.55 * (1 - pos.getZ(k) / h)], k * 4);
+  g.setAttribute("color", new THREE.BufferAttribute(col, 4));
+  return g;
 }
 
-function onInit(msg) {
-  if (msg.lidar_mount) lidarMount = msg.lidar_mount;
-  initMsg = msg;
-  $("mapname").textContent = msg.map;
-  new GLTFLoader().load(`/maps/${msg.map}/cave.glb`, (gltf) => {
-    for (const c of caveMeshes) scene.remove(c.mesh);
-    caveMeshes.length = caveMats.length = 0;
-    const box = new THREE.Box3();
-    const textured = {};          // SubT maps: one textured material pair per rock texture set
-    gltf.scene.traverse((o) => {
-      if (!o.isMesh) return;
-      if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
-      const set = o.material?.name;
-      if (ROCK_TEXTURES.includes(set)) {
-        textured[set] ??= rockMaterials(msg.map, set);
-        o.material = textured[set].over;
-        caveMeshes.push({ mesh: o, ...textured[set] });
-      } else {
-        const spike = /speleo/i.test(o.name) || /speleo/i.test(o.parent?.name || "");
-        const over = new THREE.MeshStandardMaterial({
-          color: spike ? 0xe8dcc4 : 0xc9b496, roughness: 0.9, side: THREE.DoubleSide, fog: false,
-          transparent: true, opacity: $("opacity").value / 100, depthWrite: false,
-        });
-        const fpv = new THREE.MeshStandardMaterial({
-          color: spike ? 0xd9ccb2 : 0x8f7e69, roughness: spike ? 0.55 : 0.95, metalness: 0,
-          side: THREE.DoubleSide,
-        });
-        o.material = over;
-        caveMats.push(over);
-        caveMeshes.push({ mesh: o, over, fpv });
-      }
-      box.expandByObject(o);
-    });
-    scene.add(gltf.scene);
-    caveMeshes.forEach((c) => (c.root = gltf.scene));
-    const c = box.getCenter(new THREE.Vector3());
-    controls.target.copy(c);
-    camera.position.set(c.x - 0.4 * (box.max.x - box.min.x), c.y - 0.9 * (box.max.y - box.min.y), c.z + 70);
-    controls.update();
-  });
-
-  // Base station (tent + antenna where the world puts it; a puck at the base otherwise) and home circle
-  if (msg.base_station) {
+function buildBase(msg) {
+  baseGroup.position.copy(v3(msg.base));
+  baseGround.position.z = -2.5;
+  caveU.uBase.value.copy(baseGroup.position);
+  const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.15, 0.12, 48).rotateX(Math.PI / 2),
+                             new THREE.MeshStandardMaterial({ color: 0x18202b, metalness: 0.6, roughness: 0.4 }));
+  pad.position.z = 0.06;
+  const padRing = new THREE.Mesh(new THREE.RingGeometry(0.72, 0.84, 48), new THREE.MeshBasicMaterial({ color: 0x22d3ee }));
+  padRing.position.z = 0.125;
+  const home = new THREE.Mesh(new THREE.RingGeometry(msg.home_radius - 0.07, msg.home_radius, 96),
+                              new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.5,
+                                                            side: THREE.DoubleSide, depthWrite: false }));
+  home.position.z = 0.03;
+  const beacon = new THREE.Mesh(beaconGeometry(9), new THREE.MeshBasicMaterial({
+    color: 0x22d3ee, vertexColors: true, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending }));
+  const label = tag("BASE", "base");
+  label.position.z = 2.2;
+  baseGround.add(pad, padRing, home, beacon, label);
+  if (msg.base_station) {     // tent + antenna where the SubT world puts them
     loadAsset("base_station", (m) => {
       m.position.copy(v3(msg.base_station));
-      m.rotation.z = msg.base_station[3];
+      m.rotation.z = msg.base_station[3];        // assets are exported z-up already
       scene.add(m);
     });
-  } else {
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 0.3, 24),
-                                new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x333333 }));
-    base.rotation.x = Math.PI / 2;
-    base.position.copy(v3(msg.base));
-    scene.add(base);
-  }
-  const ring = new THREE.Mesh(new THREE.RingGeometry(msg.home_radius - 0.08, msg.home_radius, 64),
-                              new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.5 }));
-  ring.position.copy(v3(msg.base)).add(new THREE.Vector3(0, 0, -2.5));
-  scene.add(ring);
-  overlays.push(ring);
-
-  // Rescue course: relabel the HUD and mark the survivor with a beacon visible from afar.
-  rescue = msg.mission?.type === "rescue" ? msg.mission : null;
-  $("lScore").textContent = rescue ? "랩 타임" : "점수";
-  $("lArts").textContent = rescue ? "구조" : "목표물";
-  $("lCov").textContent = rescue ? "난이도" : "탐사율";
-  if (rescue) {
-    const t = msg.artifacts[rescue.target];
-    const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 40, 16, 1, true),
-                                  new THREE.MeshBasicMaterial({ color: 0xffa94d, transparent: true, opacity: 0.25,
-                                                                side: THREE.DoubleSide, depthWrite: false }));
-    beacon.rotation.x = Math.PI / 2;
-    beacon.position.copy(v3(t.pos)).add(new THREE.Vector3(0, 0, 20));
-    scene.add(beacon);
-    overlays.push(beacon);
   }
 
-  for (const a of msg.artifacts) {
-    // Like the drones: the real model up close and in the camera views, a marker from afar.
-    const group = new THREE.Group();
-    group.position.copy(v3(a.pos));
-    group.rotation.z = a.yaw || 0;
-    const marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.45),
-                                  new THREE.MeshStandardMaterial({ color: 0x868e96, emissive: 0x222222 }));
-    marker.position.z = 0.6;
-    const art = { group, marker, model: null };
-    group.add(marker);
-    loadAsset(a.type, (m) => {
-      // Stand the model on its lowest point: the artifact's position is where it touches the floor,
-      // and some models (the survivor) have their origin well below their feet.
-      m.position.z -= new THREE.Box3().setFromObject(m).min.z;
-      art.model = m;
-      group.add(m);
-    });
-    group.userData = a;
-    scene.add(group);
-    artifactMeshes[a.id] = art;
+  const ring = [];
+  for (let k = 0; k <= 160; k++) {
+    const a = (k / 160) * Math.PI * 2;
+    ring.push(Math.cos(a) * msg.comms_range, Math.sin(a) * msg.comms_range, 0);
   }
-
-  for (let i = 0; i < msg.n_drones; i++) {
-    const color = COLORS[i % COLORS.length];
-    const anchor = new THREE.Group();          // true pose; the model and the marker hang off it
-    const craft = new THREE.Group();
-    // Far away the 0.5 m model is invisible, so a coloured marker with a heading cone takes over.
-    const marker = new THREE.Mesh(new THREE.SphereGeometry(0.35, 20, 14),
-                                  new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.4 }));
-    const heading = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.7, 10),
-                                   new THREE.MeshBasicMaterial({ color }));
-    heading.geometry.rotateZ(-Math.PI / 2);
-    heading.geometry.translate(0.6, 0, 0);
-    marker.add(heading);
-    anchor.add(craft, marker);
-    const ghost = new THREE.Mesh(new THREE.SphereGeometry(0.35, 12, 8),
-                                 new THREE.MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: 0.6 }));
-    const lidar = new THREE.Points(new THREE.BufferGeometry(),
-                                   new THREE.PointsMaterial({ color, size: 0.12, transparent: true, opacity: 0.7 }));
-    lidar.frustumCulled = false;
-    const pts = new THREE.Points(new THREE.BufferGeometry(),
-                                 new THREE.PointsMaterial({ color: 0xffffff, size: 0.5 }));
-    pts.frustumCulled = false;
-    const goal = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-    // The agent's own map (rock it has seen), as the agent sends it: cyan dots.
-    const map = new THREE.Points(new THREE.BufferGeometry(),
-                                 new THREE.PointsMaterial({ color: 0x3bc9db, size: 0.35, transparent: true, opacity: 0.55 }));
-    map.frustumCulled = false;
-    // A tall beam over the drone, so it can be found on the whole-cave map (like the survivor's).
-    const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 30, 12, 1, true),
-                                new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45,
-                                                              side: THREE.DoubleSide, depthWrite: false }));
-    beam.rotation.x = Math.PI / 2;
-    scene.add(anchor, ghost, lidar, pts, goal, map, beam);
-    overlays.push(ghost, lidar, pts, goal, map, beam);
-    const g = { anchor, craft, marker, ghost, lidar, pts, goal, map, beam, color, pose: null,
-                trail: makeLine(color, false, 0.9), odomTrail: makeLine(color, true, 0.6),
-                path: makeLine(0xffffff, false, 0.5) };
-    drones.push(g);
-    attachModel(g);
-  }
-  linkLines = new THREE.LineSegments(new THREE.BufferGeometry(),
-                                     new THREE.LineBasicMaterial({ color: 0x51cf66, transparent: true, opacity: 0.7 }));
-  linkLines.frustumCulled = false;
-  scene.add(linkLines);
-  overlays.push(linkLines);
-  buildDroneHud(msg.n_drones);
+  const comms = makeLine2(0x22d3ee, { width: 1, dashed: true, opacity: 0.28 });
+  comms.material.dashSize = 1.6;
+  comms.material.gapSize = 1.0;
+  baseGroup.add(comms);
+  setLine2(comms, ring);
+  comms.visible = true;
 }
 
-function buildDroneHud(n) {
+// ---------------------------------------------------------------- artifacts
+const ART_GEO = {
+  survivor: new THREE.CapsuleGeometry(0.2, 0.55, 4, 12).rotateX(Math.PI / 2),
+  backpack: new THREE.BoxGeometry(0.45, 0.32, 0.55),
+  phone: new THREE.BoxGeometry(0.36, 0.06, 0.6),
+  helmet: new THREE.SphereGeometry(0.34, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2).rotateX(Math.PI / 2),
+  rope: new THREE.TorusGeometry(0.28, 0.07, 10, 28),
+};
+
+function buildArtifact(a, k) {
+  const info = ARTIFACTS[a.type] || { name: a.type, color: 0xadb5bd };
+  const mat = new THREE.MeshStandardMaterial({ color: info.color, emissive: info.color, emissiveIntensity: 0.25,
+                                               transparent: true, opacity: 0.5, roughness: 0.5 });
+  const mesh = new THREE.Mesh(ART_GEO[a.type] || new THREE.OctahedronGeometry(0.45), mat);
+  const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: GLOW, color: info.color, transparent: true,
+                                                           depthWrite: false, blending: THREE.AdditiveBlending }));
+  glow.scale.setScalar(2.4);
+  glow.visible = false;
+  const label = tag(info.name, "art");
+  label.position.z = 0.9;
+  const group = new THREE.Group();
+  group.add(mesh, glow, label);
+  group.position.copy(v3(a.pos));
+  scene.add(group);
+  const o = artifactObjs[a.id] = { a, info, group, mesh, glow, label, phase: a.id * 1.7, lift: 0.35, beacon: null };
+  // The real model on the floor (its position is where it touches down; some models, the survivor,
+  // have their origin well below their feet), our marker floating above it.
+  loadAsset(a.type, (m) => {
+    m.rotation.z = a.yaw || 0;
+    const box = new THREE.Box3().setFromObject(m);
+    m.position.z -= box.min.z;
+    group.add(m);
+    o.lift = box.max.z - box.min.z + 0.5;
+    mesh.scale.setScalar(0.6);
+    glow.position.z = o.lift;
+    label.position.z = o.lift + 0.6;
+  });
+  if (rescue && k === rescue.target) {    // the survivor: a beam visible from across the map
+    o.beacon = new THREE.Mesh(beaconGeometry(40), new THREE.MeshBasicMaterial({
+      color: info.color, vertexColors: true, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending }));
+    group.add(o.beacon);
+  }
+}
+
+function markFound(id, celebrate, isFound = true) {
+  const o = artifactObjs[id];
+  if (!o) return;
+  o.mesh.material.opacity = isFound ? 1 : 0.5;
+  o.mesh.material.emissiveIntensity = isFound ? 1.6 : 0.25;
+  o.glow.visible = isFound;
+  o.label.element.textContent = isFound ? `✓ ${o.info.name}` : o.info.name;
+  o.label.element.classList.toggle("found", isFound);
+  if (celebrate) {
+    burst(o.group.position, o.info.color, { to: 7, life: 1.6 });
+    burst(o.group.position, 0x4ade80, { to: 4, life: 1.1 });
+    logEvent(`Found ${o.info.name}`, "good");
+  }
+}
+
+// ---------------------------------------------------------------- HUD
+const ui = {};   // cached per-drone card elements
+
+function buildCards(n) {
   const box = $("drones");
   box.innerHTML = "";
   for (let i = 0; i < n; i++) {
     const el = document.createElement("div");
     el.className = "drone" + (i === selected ? " sel" : "");
-    el.innerHTML = `<div class="row"><span><span class="dot" style="background:#${COLORS[i % COLORS.length].toString(16).padStart(6, "0")}"></span>드론 ${i}</span>
-      <span class="st muted"></span></div><div class="row muted"><span class="mode"></span><span class="drift"></span></div>
-      <div class="bar"><div class="batt"></div></div>`;
-    el.onclick = () => { selected = i; [...box.children].forEach((c, k) => c.classList.toggle("sel", k === i)); };
+    el.style.setProperty("--c", hex(COLORS[i % COLORS.length]));
+    el.innerHTML = `<i class="swatch"></i><div class="dmain">
+      <div class="row"><span class="dname">Drone ${i}</span>
+        <span class="row" style="gap:6px"><span class="link">● base</span><span class="chip st">-</span></span></div>
+      <div class="row muted small"><span class="mode"></span><span class="drift mono"></span></div>
+      <div class="row small"><div class="bar" style="flex:1"><div class="batt"></div></div><span class="pct mono muted"></span></div>
+    </div>`;
+    el.onclick = () => select(i);
+    el.ondblclick = () => { select(i); setCamMode("chase"); };
     box.appendChild(el);
+    ui[i] = { el, st: el.querySelector(".st"), link: el.querySelector(".link"), mode: el.querySelector(".mode"),
+              drift: el.querySelector(".drift"), batt: el.querySelector(".batt"), pct: el.querySelector(".pct") };
   }
 }
 
-const STATUS_KO = { flying: "비행", landing: "착륙 중", landed: "착륙", crashed: "충돌", dead: "배터리 방전",
-                    out: "코스 이탈" };
+function logEvent(text, cls = "") {
+  const li = document.createElement("li");
+  li.innerHTML = `<span class="t"></span><span class="${cls}"></span>`;
+  li.firstChild.textContent = lastState ? `${lastState.t.toFixed(0)}s` : "--";
+  li.lastChild.textContent = text;
+  const list = $("events");
+  list.prepend(li);
+  while (list.children.length > 9) list.lastChild.remove();
+}
+
+function select(i) {
+  if (i >= drones.length) return;
+  selected = i;
+  Object.values(ui).forEach((u, k) => u.el.classList.toggle("sel", k === i));
+  selRing.material.color.setHex(drones[i].color);
+  updateTele();
+}
+
+// ---------------------------------------------------------------- messages
+function onInit(msg) {
+  initMsg = msg;
+  $("mapname").textContent = msg.map;
+  $("tmax").textContent = msg.mission_time_s;
+  rescue = msg.mission?.type === "rescue" ? msg.mission : null;
+  document.body.classList.toggle("rescue", !!rescue);
+  $("lScore").textContent = rescue ? "Lap time" : "Score";
+  $("lArts").textContent = rescue ? "Rescued" : "Artifacts";
+  buildBase(msg);
+  msg.artifacts.forEach(buildArtifact);
+  for (let i = 0; i < msg.n_drones; i++) drones.push(makeDrone(i));
+  linkLine = makeLine2(0x5effc0, { width: 1.8, dashed: true, opacity: 0.85, segments: true });
+  linkLine.material.dashSize = 0.7;
+  linkLine.material.gapSize = 0.45;
+  buildCards(msg.n_drones);
+  select(0);
+  logEvent(`Connected · ${msg.map} · ${msg.n_drones} drones`);
+
+  new GLTFLoader().load(`/maps/${msg.map}/cave.glb`, (gltf) => {
+    cave = gltf.scene;
+    cave.traverse((o) => {
+      if (!o.isMesh) return;
+      if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+      if (ROCK_TEXTURES.includes(o.material?.name)) o.userData.rock = texturedRock(msg.map, o.material.name);
+    });
+    scene.add(cave);
+    cave.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(cave);
+    const c = box.getCenter(new THREE.Vector3());
+    caveU.uZ.value.set(box.min.z, box.max.z);
+    applyCave();
+
+    const size = Math.ceil((Math.max(box.max.x - box.min.x, box.max.y - box.min.y) * 1.5) / 10) * 10;
+    grid = new THREE.GridHelper(size, size / 5, 0x2b4a6b, 0x15263a);
+    grid.rotation.x = Math.PI / 2;
+    grid.position.set(c.x, c.y, box.min.z - 0.5);
+    grid.material.transparent = true;
+    grid.material.opacity = 0.4;
+    grid.material.depthWrite = false;
+    scene.add(grid);
+
+    // Put the pad on the cave floor right under the base.
+    ray.set(baseGroup.position, new THREE.Vector3(0, 0, -1));
+    ray.far = 20;
+    const hit = ray.intersectObject(cave, true)[0];
+    if (hit) baseGround.position.z = hit.point.z - baseGroup.position.z + 0.03;
+
+    controls.target.copy(c);
+    const off = new THREE.Vector3(-0.4 * (box.max.x - box.min.x), -0.9 * (box.max.y - box.min.y), 70);
+    intro = { c, off, t: 0 };
+  });
+}
+
+function onState(msg) {
+  if (!initMsg) return;
+  remember(msg);
+  if (replayAt === null) applyState(msg);
+  updateReplayBar();
+}
+
+// instant: jump instead of easing (a replay seek). quiet: no log lines or bursts.
+function applyState(msg, { instant = false, quiet = !seeded } = {}) {
+  lastState = msg;
+  const s = msg.score;
+  $("time").textContent = msg.t.toFixed(1);
+  $("tbar").style.width = `${Math.min(100, (100 * msg.t) / initMsg.mission_time_s)}%`;
+  if (rescue) {
+    const first = Object.values(s.rescued_at_s || {})[0];
+    $("score").textContent = s.lap_time_s != null ? `${s.lap_time_s.toFixed(1)}s` : "—";
+    $("arts").textContent = first != null ? `${first.toFixed(0)}s` : "—";
+  } else {
+    $("score").textContent = s.score.toFixed(1);
+    $("arts").textContent = `${s.artifacts_found}/${s.artifacts_total}`;
+  }
+  $("cov").textContent = `${Math.round(100 * s.coverage)}%`;
+  $("ret").textContent = `${s.returned.length}/${initMsg.n_drones}`;
+
+  msg.drones.forEach((d, i) => {
+    const g = drones[i];
+    const p = v3(d.pos);
+    g.hasOdom = !!d.odom;                // null with --odom off
+    if (g.hasOdom) g.odom.copy(v3(d.odom));
+    if (g.lastT === null || instant) {
+      g.root.position.copy(p);
+      g.yaw = d.yaw;
+      g.ghost.position.copy(g.odom);
+    }
+    g.lastT = msg.t;
+    g.target.copy(p);
+    g.targetYaw = d.yaw;
+    g.rp = d.rp || [0, 0];
+    g.battery = d.battery;
+    g.mix = d.mix || null;
+
+    if (d.status !== g.status) {
+      if (!quiet) {
+        const home = Math.hypot(d.pos[0] - initMsg.base[0], d.pos[1] - initMsg.base[1]) <= initMsg.home_radius;
+        if (d.status === "crashed") logEvent(`Drone ${i} crashed`, "bad");
+        else if (d.status === "dead") logEvent(`Drone ${i} battery dead`, "bad");
+        else if (d.status === "out") logEvent(`Drone ${i} left the course`, "bad");
+        else if (d.status === "landing") logEvent(`Drone ${i} landing`);
+        else if (d.status === "landed") logEvent(home ? `Drone ${i} returned home` : `Drone ${i} landed away from base`, home ? "good" : "warn");
+      }
+      g.status = d.status;
+      g.alive = d.status === "flying" || d.status === "landing";
+      g.led.emissiveIntensity = g.alive ? 3 : d.status === "landed" ? 1 : 0.1;
+      g.lamp.intensity = g.alive ? LIGHT.lamp : 0;
+      g.rotors.forEach((r) => { if (r.disc) r.disc.visible = g.alive; });
+      if (d.status === "crashed") g.tilt.rotation.set(1.1, 0.5, 0);
+      g.label.element.classList.toggle("dead", ["crashed", "dead", "out"].includes(d.status));
+    }
+    if (g.alive && d.battery < 0.2 && !g.lowWarned) {
+      g.lowWarned = true;
+      if (!quiet) logEvent(`Drone ${i} battery below 20%`, "warn");
+    }
+
+    if (d.lidar) addToMap(d.lidar);
+    g.scan.visible = !!d.lidar && on("cLidar");
+    if (g.scan.visible) setPoints(g.scan, d.lidar);
+
+    const dbg = d.debug || {};
+    const dv = on("cDebug");
+    const hasPath = !!(dbg.path && dbg.path.length);
+    if (hasPath) setLine2(g.path, [d.odom || d.pos, ...dbg.path.slice().reverse()].flat());
+    g.path.visible = dv && hasPath;
+    g.goal.visible = dv && !!dbg.goal;
+    if (dbg.goal) g.goal.position.copy(v3(dbg.goal));
+    const hasPts = !!(dbg.points && dbg.points.length);
+    if (hasPts) setPoints(g.pts, dbg.points.flat());
+    g.pts.visible = dv && hasPts;
+    if (dbg.map) {                       // agents may send their map only now and then: keep the last one
+      setPoints(g.amap, dbg.map.flat());
+      g.hasAmap = dbg.map.length > 0;
+    }
+    g.amap.visible = on("cAgentMap") && !!g.hasAmap;
+
+    const u = ui[i];
+    u.st.textContent = d.status;
+    u.st.className = `chip st ${d.status}`;
+    u.link.classList.toggle("on", msg.base_links.includes(i));
+    u.mode.textContent = dbg.mode ? `mode · ${dbg.mode}` : "";
+    u.drift.textContent = d.odom
+      ? `drift ${Math.hypot(d.pos[0] - d.odom[0], d.pos[1] - d.odom[1], d.pos[2] - d.odom[2]).toFixed(2)} m`
+      : "odometry off";
+    u.batt.style.width = `${100 * d.battery}%`;
+    u.batt.style.background = d.battery > 0.4 ? "var(--good)" : d.battery > 0.2 ? "var(--warn)" : "var(--bad)";
+    u.pct.textContent = `${Math.round(100 * d.battery)}%`;
+  });
+
+  const nowFound = new Set(msg.found);
+  for (const id of nowFound) if (!found.has(id)) { found.add(id); markFound(id, !quiet); }
+  for (const id of found) if (!nowFound.has(id)) { found.delete(id); markFound(id, false, false); }   // replayed back
+  if (rescue) {
+    const at = s.rescued_at_s || {};
+    for (const i of Object.keys(at)) {
+      if (rescued.has(i)) continue;
+      rescued.add(i);
+      if (quiet) continue;
+      logEvent(`Drone ${i} reached the survivor`, "good");
+      const o = artifactObjs[initMsg.artifacts[rescue.target].id];
+      if (o) burst(o.group.position, 0x4ade80, { to: 8, life: 1.6 });
+    }
+    for (const i of rescued) if (!(i in at)) rescued.delete(i);
+    if (s.lap_time_s != null && !lapped && !quiet) logEvent(`Lap complete · ${s.lap_time_s.toFixed(1)} s`, "good");
+    lapped = s.lap_time_s != null;
+  }
+  seeded = true;
+  updateTele();
+}
+
+function updateTele() {
+  const d = lastState && lastState.drones[selected];
+  if (!d) return;
+  $("tSpd").textContent = `${Math.hypot(...(d.vel || [0, 0, 0])).toFixed(2)} m/s`;
+  $("tClr").textContent = d.clear == null ? "> 1.4 m" : `${d.clear.toFixed(2)} m`;
+  $("tClr").classList.toggle("warn", d.clear != null && d.clear < 0.4);
+  $("tGust").textContent = `${Math.hypot(...(d.aero || [0, 0, 0])).toFixed(2)} m/s²`;
+  const rp = d.rp || [0, 0];
+  $("tAtt").textContent = `${(rp[0] * 57.3).toFixed(0)}° · ${(rp[1] * 57.3).toFixed(0)}°`;
+  $("tBat").textContent = `${Math.round(100 * d.battery)}%`;
+  if (rescue) {
+    // Bearing off the nose, distance and height to the survivor and to home: what a keyboard pilot needs.
+    const arrow = (t) => {
+      const dx = t[0] - d.pos[0], dy = t[1] - d.pos[1], dz = t[2] - d.pos[2];
+      return `<i style="transform:rotate(${-wrap(Math.atan2(dy, dx) - d.yaw)}rad)">⬆</i> ` +
+        `${Math.hypot(dx, dy, dz).toFixed(0)} m · ${dz >= 0 ? "+" : ""}${dz.toFixed(0)}`;
+    };
+    $("tSurv").innerHTML = arrow(initMsg.artifacts[rescue.target].pos);
+    $("tHome").innerHTML = arrow(initMsg.base);
+  }
+}
+
+function onTrails(msg) {
+  msg.true.forEach((tr, i) => {
+    const g = drones[i];
+    if (!g || tr.length < 2) return;
+    const c = new THREE.Color(g.color), col = new Float32Array(tr.length * 3);
+    for (let k = 0; k < tr.length; k++) {
+      const f = 0.12 + 0.88 * (k / (tr.length - 1)) ** 1.5;     // older segments fade out
+      col[k * 3] = c.r * f; col[k * 3 + 1] = c.g * f; col[k * 3 + 2] = c.b * f;
+    }
+    setLine2(g.trail, tr.flat(), col);
+    g.hasTrail = true;
+  });
+  msg.odom.forEach((tr, i) => { if (drones[i] && tr.length >= 2) setLine2(drones[i].odomTrail, tr.flat()); });
+  applyToggles();
+}
+
+function onDone(msg) {
+  const s = msg.score;
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  if (rescue) {
+    const at = Object.values(s.rescued_at_s || {})[0];
+    const failed = [[s.crashed, "crashed"], [s.battery_dead, "battery dead"], [s.out_of_course, "left the course"]]
+      .filter(([ids]) => ids.length).map(([, why]) => why);
+    const cause = Object.values(s.crash_cause || {})[0];
+    const rows = [
+      ["Survivor reached", at != null ? `${at.toFixed(1)} s` : "no", ""],
+      ["Landed home", s.returned.length ? "yes" : "no", ""],
+      ["Failure", failed.length ? failed.join(", ") + (cause ? ` (${cause})` : "") : s.success ? "-" : "time up", ""],
+      null,
+      ["Collisions", `${s.collisions.reduce((x, y) => x + y, 0)}`, ""],
+      ["Worst hit", `${Math.max(0, ...s.worst_hit_ms).toFixed(2)} m/s`, ""],
+      ["Total distance", `${s.distance_m.reduce((x, y) => x + y, 0).toFixed(0)} m`, ""],
+      ["Final odometry drift", `${avg(s.final_drift_m).toFixed(2)} m`, ""],
+      ["Mission time", `${s.time_s} s`, ""],
+    ];
+    $("fLabel").textContent = s.success ? "RESCUE · LAP TIME" : "RESCUE FAILED";
+    $("fScore").textContent = s.success ? `${s.lap_time_s.toFixed(1)}s` : "—";
+    $("fGrid").innerHTML = rows.map((r) => (r ? `<span>${r[0]}</span><span class="v">${r[1]}</span><span class="pts">${r[2]}</span>` : "<hr>")).join("");
+    $("final").style.display = "block";
+    logEvent(s.success ? `Mission over · lap ${s.lap_time_s.toFixed(1)} s` : "Mission over · rescue failed", s.success ? "good" : "bad");
+    return;
+  }
+  const rows = [
+    ["Artifacts found", `${s.artifacts_found} / ${s.artifacts_total}`, `+${10 * s.artifacts_found}`],
+    ["Drones home", `${s.returned.length}`, `+${5 * s.returned.length}`],
+    ["Coverage", `${(100 * s.coverage).toFixed(1)}%`, `+${(20 * s.coverage).toFixed(1)}`],
+    null,
+    ["Crashed / battery dead", `${s.crashed.length} / ${s.battery_dead.length}`, ""],
+    ["Reports used", `${s.reports_used}`, ""],
+    ["Total distance", `${s.distance_m.reduce((x, y) => x + y, 0).toFixed(0)} m`, ""],
+    ["Mean odometry drift", `${avg(s.final_drift_m).toFixed(2)} m`, ""],
+    ["Mission time", `${s.time_s} s`, ""],
+  ];
+  $("fScore").textContent = s.score.toFixed(1);
+  $("fGrid").innerHTML = rows.map((r) => (r ? `<span>${r[0]}</span><span class="v">${r[1]}</span><span class="pts">${r[2]}</span>` : "<hr>")).join("");
+  $("final").style.display = "block";
+  logEvent(`Mission over · score ${s.score}`, "good");
+}
+
+// ---------------------------------------------------------------- view modes
+function applyCave() {
+  const o = $("opacity").value / 100;
+  caveU.uOpacity.value = o;
+  for (const m of [rockMat, ...Object.values(texMats)]) {
+    m.opacity = o;
+    m.depthWrite = o >= 0.95;
+  }
+  if (!cave) return;
+  cave.visible = caveStyle !== "off";
+  cave.traverse((m) => { if (m.isMesh) m.material = caveStyle === "rock" ? m.userData.rock || rockMat : holoMat; });
+}
+
+function setCaveStyle(style, opacity) {
+  caveStyle = style;
+  segSelect("caveStyle", style);
+  if (opacity !== undefined) $("opacity").value = opacity;
+  applyCave();
+}
+
+function setCamMode(mode) {
+  if (mode === camMode) return;
+  const inside = (m) => m === "chase" || m === "fpv";
+  if (inside(mode) && !inside(camMode)) {
+    saved = { style: caveStyle, opacity: $("opacity").value, pos: camera.position.clone(), target: controls.target.clone() };
+    setCaveStyle("rock", 100);
+    lookAt.copy(controls.target);
+  }
+  if (!inside(mode) && inside(camMode)) {
+    if (saved) {
+      setCaveStyle(saved.style, saved.opacity);
+      camera.position.copy(saved.pos);
+      controls.target.copy(saved.target);
+    }
+  }
+  camMode = mode;
+  intro = null;
+  document.body.classList.toggle("inside", inside(mode));
+  segSelect("cam", mode);
+  controls.enabled = !inside(mode);
+  bloom.threshold = inside(mode) ? 0.9 : 0.72;
+  if (grid) grid.visible = !inside(mode);
+  if (inside(mode)) return;       // updateDaylight() lights the camera views
+  scene.fog.density = FOG.outside;
+  scene.fog.color.setHex(0x05080d);
+  scene.background = BACKDROP;
+  hemi.intensity = LIGHT.hemi;
+  sun.intensity = LIGHT.sun;
+}
+
+// SubT worlds start outside the cave mouth: under open sky the camera views use daylight, under rock
+// darkness and the drones' lamps. Daylight follows the share of the sky the camera can see (straight
+// up, 8 rays at 45 deg, 4 at 20 deg), re-measured five times a second, so a cave mouth stays half lit.
+const SKY_DIRS = [new THREE.Vector3(0, 0, 1)];
+for (let k = 0; k < 8; k++) SKY_DIRS.push(new THREE.Vector3(Math.cos(k * Math.PI / 4), Math.sin(k * Math.PI / 4), 1).normalize());
+for (let k = 0; k < 4; k++) SKY_DIRS.push(new THREE.Vector3(Math.cos((k + 0.5) * Math.PI / 2), Math.sin((k + 0.5) * Math.PI / 2), Math.tan(Math.PI / 9)).normalize());
+let daylight = 0, skyOpen = 0, skyCheckIn = 0;
+const skyColor = new THREE.Color(), BLACK = new THREE.Color(0, 0, 0);
+
+function updateDaylight(dt) {
+  if (!(camMode === "chase" || camMode === "fpv") || !cave) return;
+  skyCheckIn -= dt;
+  if (skyCheckIn <= 0) {
+    skyCheckIn = 0.2;
+    ray.far = 60;
+    const free = SKY_DIRS.filter((d) => { ray.set(camera.position, d); return !ray.intersectObject(cave, true).length; });
+    skyOpen = Math.min(1.5 * free.length / SKY_DIRS.length, 1);
+  }
+  daylight += (skyOpen - daylight) * damp(dt, 3);
+  const lerp = THREE.MathUtils.lerp;
+  hemi.intensity = lerp(0.05 * LIGHT_GAIN, LIGHT.hemi, daylight);
+  sun.intensity = lerp(0, LIGHT.sun, daylight);
+  scene.fog.density = lerp(FOG.inside, FOG.outside, daylight);
+  skyColor.lerpColors(BLACK, DAY_SKY, daylight);
+  scene.fog.color.copy(skyColor);
+  scene.background = daylight > 0.02 ? skyColor : BACKDROP;
+}
+
+function applyToggles() {
+  drones.forEach((g) => {
+    g.trail.visible = on("cTrail") && g.hasTrail;
+    g.odomTrail.visible = on("cTrail") && on("cOdom") && g.hasTrail;
+  });
+  mapCloud.visible = on("cMap");
+  bloom.enabled = on("cBloom");
+  document.body.classList.toggle("no-labels", !on("cLabels"));
+}
+
+// ---------------------------------------------------------------- per frame
+const lookAt = new THREE.Vector3(), _v = new THREE.Vector3(), _w = new THREE.Vector3();
+
+function updateDrones(dt, t) {
+  const k = damp(dt, 12);
+  const inside = camMode === "chase" || camMode === "fpv";
+  drones.forEach((g, i) => {
+    g.root.position.lerp(g.target, k);
+    g.yaw += wrap(g.targetYaw - g.yaw) * k;
+    g.root.rotation.z = g.yaw;
+    if (g.alive) {
+      g.tilt.rotation.x += (g.rp[0] - g.tilt.rotation.x) * k;
+      g.tilt.rotation.y += (g.rp[1] - g.tilt.rotation.y) * k;
+      if (g.battery < 0.2) g.led.emissiveIntensity = Math.sin(t * 9) > 0 ? 3 : 0.3;
+    }
+    // Quadrotor mixer: each rotor gets a share of the thrust, more or less by where it sits (roll:
+    // left/right, pitch: front/back) and by its spin direction (yaw). Speed ~ sqrt(thrust), eased.
+    const [T, roll, pitch, yaw] = g.mix || (g.alive ? [1, 0, 0, 0] : [0, 0, 0, 0]);
+    for (const r of g.rotors) {
+      const share = Math.max(T * (1 + MIX_TILT * (roll * r.y - pitch * r.x) - MIX_YAW * yaw * r.dir), 0);
+      r.w += (Math.sqrt(share) - r.w) * damp(dt, 8);
+      r.obj.rotation[r.axis] += r.dir * PROP_SPEED * r.w * dt;
+    }
+    const odomOn = on("cOdom") && g.hasOdom;
+    g.ghost.position.lerp(g.odom, k);
+    g.ghost.visible = g.errLine.visible = odomOn && !inside;
+    if (odomOn) {
+      g.errLine.geometry.attributes.position.array.set([...g.root.position.toArray(), ...g.ghost.position.toArray()]);
+      g.errLine.geometry.attributes.position.needsUpdate = true;
+    }
+    g.goal.rotation.z += dt * 1.5;
+
+    const me = camMode === "fpv" && i === selected;
+    g.model.visible = !me;
+    g.beam.visible = !me && g.alive;
+    g.label.visible = !me;
+    const dist = camera.position.distanceTo(g.root.position);
+    g.halo.visible = !me;
+    g.halo.material.opacity = THREE.MathUtils.smoothstep(dist, 8, 30) * (g.alive ? 0.9 : 0.3);
+  });
+
+  const g = drones[selected];
+  selRing.visible = !!g && !inside;
+  if (g) {
+    selRing.position.copy(g.root.position);
+    selRing.position.z -= 0.35;
+    selRing.scale.setScalar(1 + 0.12 * Math.sin(t * 4));
+  }
+}
+
+function updateLinks(dt) {
+  if (!linkLine) return;
+  const arr = [];
+  if (lastState && on("cLinks")) {
+    const p = (a) => drones[a].root.position.toArray();
+    for (const [a, b] of lastState.links) arr.push(...p(a), ...p(b));
+    for (const a of lastState.base_links) arr.push(...p(a), ...initMsg.base);
+  }
+  linkLine.visible = arr.length > 0;
+  if (!arr.length) return;
+  setLine2(linkLine, arr);
+  linkLine.material.dashOffset -= dt * 2.5;
+}
+
+function updateScene(dt, t) {
+  const inside = camMode === "chase" || camMode === "fpv";
+  for (const o of Object.values(artifactObjs)) {
+    const isFound = found.has(o.a.id);
+    o.group.visible = isFound || on("cTruth");
+    o.label.visible = o.group.visible && (!inside || camera.position.distanceTo(o.group.position) < 15);
+    o.mesh.rotation.z = t * 0.6 + o.phase;
+    o.mesh.position.z = o.lift + Math.sin(t * 1.6 + o.phase) * 0.08;
+    if (o.beacon) o.beacon.visible = !inside;
+    if (isFound) o.glow.material.opacity = 0.55 + 0.25 * Math.sin(t * 3 + o.phase);
+  }
+  if (initMsg && t - lastPulse > 2.4) {
+    lastPulse = t;
+    burst(baseGround.getWorldPosition(_v).add(new THREE.Vector3(0, 0, 0.05)), 0x22d3ee, { from: 1, to: initMsg.home_radius * 1.8, life: 2.2 });
+  }
+  for (let k = effects.length - 1; k >= 0; k--) {
+    const e = effects[k];
+    e.t += dt;
+    const u = e.t / e.life;
+    if (u >= 1) {
+      scene.remove(e.m);
+      e.m.material.dispose();
+      effects.splice(k, 1);
+      continue;
+    }
+    e.m.scale.setScalar(e.from + (e.to - e.from) * (1 - (1 - u) ** 3));
+    e.m.material.opacity = (1 - u) ** 2;
+  }
+}
+
+function updateCamera(dt) {
+  const g = drones[selected];
+  if (camMode === "orbit" || !g) {
+    if (intro) {
+      intro.t += dt;
+      const u = Math.min(intro.t / 3, 1), e = 1 - (1 - u) ** 3;
+      _v.copy(intro.off).applyAxisAngle(camera.up, -1.1 * (1 - e)).multiplyScalar(1 + 1.2 * (1 - e));
+      camera.position.copy(intro.c).add(_v);
+      if (u >= 1) intro = null;
+    }
+    controls.update();
+    return;
+  }
+  const p = g.root.position;
+  if (camMode === "follow") {
+    _v.copy(p).sub(controls.target).multiplyScalar(damp(dt, 6));
+    controls.target.add(_v);
+    camera.position.add(_v);
+    controls.update();
+    return;
+  }
+  const fwd = _w.set(Math.cos(g.yaw), Math.sin(g.yaw), 0);
+  if (camMode === "chase") {
+    // Behind and above; up against a ceiling that view is rock, so try level, then from below, and
+    // take the first with most of the distance free, else the one with the most room, short of the rock.
+    const len = Math.hypot(3.4, 1.4);
+    let want = null, best = null;
+    for (const pitch of [Math.atan2(1.4, 3.4), 0, -0.3]) {
+      const dir = _v.copy(fwd).multiplyScalar(-Math.cos(pitch)).setZ(Math.sin(pitch)).clone();
+      let free = len;
+      if (cave) {
+        ray.set(p, dir);
+        ray.far = len;
+        const hit = ray.intersectObject(cave, true)[0];
+        if (hit) free = hit.distance;
+      }
+      if (!best || free > best.free) best = { dir, free };
+      if (free >= 0.8 * len) { want = p.clone().addScaledVector(dir, free < len ? free - 0.25 : free); break; }
+    }
+    want ??= p.clone().addScaledVector(best.dir, Math.max(best.free - 0.25, 0.1));
+    camera.position.lerp(want, damp(dt, 5));
+    lookAt.lerp(_v.copy(p).addScaledVector(fwd, 2.5), damp(dt, 8));
+  } else {
+    camera.position.copy(p).addScaledVector(fwd, 0.45);
+    camera.position.z += 0.08;
+    lookAt.copy(p).addScaledVector(fwd, 6);
+    lookAt.z -= 0.4;
+  }
+  camera.lookAt(lookAt);
+}
 
 // ---------------------------------------------------------------- replay
-// Every state message is kept (LiDAR thinned) so the run can be scrubbed back and replayed.
+// Every state is kept (LiDAR thinned) so the run can be scrubbed back and replayed.
 const history = [];
 let replayAt = null;        // index into history while replaying, null when live
-let replayPlaying = false;
+let replayPlaying = false, replaySpeed = 1;
 let scrubbing = false;      // the replay bar's thumb is held
 const REPLAY_LIDAR_PTS = 600;
 
 function remember(msg) {
-  const slim = { ...msg, drones: msg.drones.map((d) => {
+  history.push({ ...msg, drones: msg.drones.map((d) => {
     if (!d.lidar) return d;
     const step = Math.max(1, Math.ceil(d.lidar.length / 3 / REPLAY_LIDAR_PTS));
     const pts = [];
     for (let k = 0; k < d.lidar.length; k += 3 * step) pts.push(d.lidar[k], d.lidar[k + 1], d.lidar[k + 2]);
     return { ...d, lidar: pts };
-  }) };
-  history.push(slim);
+  }) });
 }
 
 function onHistory(msg) {
   // The server's record of the run so far (a reload or a late join): LiDAR and debug come every
-  // few ticks, so carry each forward to the ticks between.
+  // few ticks, so carry each forward to the ticks between. The LiDAR also rebuilds the map.
   history.length = 0;
-  let last = [];
+  const last = [];
   for (const st of msg.states) {
     st.drones.forEach((d, i) => {
-      if (d.lidar) last[i] = { lidar: d.lidar, debug: d.debug };
+      if (d.lidar) { last[i] = { lidar: d.lidar, debug: d.debug }; addToMap(d.lidar); }
       else if (last[i]) { d.lidar = last[i].lidar; d.debug = last[i].debug; }
     });
     remember(st);
@@ -469,15 +1236,14 @@ function onHistory(msg) {
 function trailsUpTo(k) {
   // Rebuild trails from the stored states (every 5th, like the server's trails).
   const tru = drones.map(() => []), odo = drones.map(() => []);
-  for (let j = 0; j <= k; j += 5) {
-    history[j].drones.forEach((d, i) => { tru[i].push(d.pos); if (d.odom) odo[i].push(d.odom); });
-  }
+  for (let j = 0; j <= k; j += 5) history[j].drones.forEach((d, i) => { tru[i].push(d.pos); if (d.odom) odo[i].push(d.odom); });
   onTrails({ true: tru, odom: odo });
 }
 
 function showReplay(k, instant = true) {
-  replayAt = Math.max(0, Math.min(k, history.length - 1));
-  applyState(history[replayAt], instant);
+  if (!history.length) return;
+  replayAt = THREE.MathUtils.clamp(k, 0, history.length - 1);
+  applyState(history[replayAt], { instant, quiet: true });
   trailsUpTo(replayAt);
   updateReplayBar();
 }
@@ -485,446 +1251,129 @@ function showReplay(k, instant = true) {
 function goLive() {
   replayAt = null;
   replayPlaying = false;
-  if (history.length) applyState(history[history.length - 1], true);
+  if (history.length) applyState(history[history.length - 1], { instant: true, quiet: true });
   updateReplayBar();
 }
 
 function updateReplayBar() {
   const bar = $("rpBar");
   bar.max = Math.max(history.length - 1, 0);
-  const k = replayAt == null ? history.length - 1 : replayAt;
+  const k = replayAt ?? history.length - 1;
   if (!scrubbing) bar.value = k;
   const t = history[k] ? history[k].t : 0, end = history.length ? history[history.length - 1].t : 0;
-  $("rpTime").textContent = replayAt == null ? `${end.toFixed(1)} s` : `${t.toFixed(1)} / ${end.toFixed(1)} s`;
-  $("rpLive").className = replayAt == null ? "live" : "";
+  $("rpTime").textContent = replayAt === null ? `${end.toFixed(1)} s` : `${t.toFixed(1)} / ${end.toFixed(1)} s`;
+  $("rpLive").classList.toggle("live", replayAt === null);
   $("rpPlay").textContent = replayPlaying ? "❚❚" : "▶";
 }
 
-// Live, every state (10 a second) put the thumb back at the end and the drag never took:
+// Live, every state (10 a second) would put the thumb back at the end and the drag never took:
 // holding the thumb leaves live at once, and nothing moves it while it is held.
 $("rpBar").addEventListener("pointerdown", () => {
   scrubbing = true;
   replayPlaying = false;
-  if (replayAt == null) replayAt = Math.max(history.length - 1, 0);
+  if (replayAt === null) replayAt = Math.max(history.length - 1, 0);
 });
 addEventListener("pointerup", () => { scrubbing = false; });
 $("rpBar").oninput = (e) => { replayPlaying = false; showReplay(Number(e.target.value)); };
 $("rpLive").onclick = goLive;
 $("rpPlay").onclick = () => {
-  if (replayAt == null) showReplay(history.length - 1);
+  if (replayAt === null) showReplay(history.length - 1);
   replayPlaying = !replayPlaying;
   updateReplayBar();
 };
 setInterval(() => {
   // Replay at the recorded pace (one state per 0.1 s of sim time); catching up means live again.
-  if (replayAt == null || !replayPlaying) return;
+  if (replayAt === null || !replayPlaying) return;
   if (replayAt >= history.length - 1) { goLive(); return; }
-  showReplay(replayAt + Number($("rpSpeed").value), false);
+  showReplay(replayAt + replaySpeed, false);
 }, 100);
 
-function onState(msg) {
-  if (!initMsg) return;
-  remember(msg);
-  if (replayAt == null) applyState(msg, false);
-  updateReplayBar();
-}
+// ---------------------------------------------------------------- socket and controls
+function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
 
-function applyState(msg, instant) {
-  const now = performance.now();
-  if (lastStateAt && !instant) stateDt += (Math.min(Math.max(now - lastStateAt, 20), 500) - stateDt) * 0.2;
-  lastStateAt = now;
-  lastState = msg;
-  $("time").textContent = `${msg.t.toFixed(1)} / ${initMsg.mission_time_s} s`;
-  if (rescue) {
-    const s = msg.score, saved = Object.entries(s.rescued_at_s || {});
-    $("score").textContent = s.lap_time_s != null ? `${s.lap_time_s.toFixed(1)} s` : "-";
-    $("arts").textContent = saved.length ? `드론 ${saved[0][0]} · ${saved[0][1].toFixed(1)} s` : "아직";
-    $("cov").textContent = rescue.difficulty || "-";
-  } else {
-    $("score").textContent = msg.score.score;
-    $("arts").textContent = `${msg.score.artifacts_found} / ${msg.score.artifacts_total}`;
-    $("cov").textContent = `${(100 * msg.score.coverage).toFixed(0)} %`;
-  }
-
-  const show = (id) => $(id).checked;
-  msg.drones.forEach((d, i) => {
-    const g = drones[i];
-    // Interpolate from wherever the drone is drawn now to the new pose over one message interval.
-    const target = { pos: v3(d.pos), q: quatOf(d.yaw, d.rp) };
-    g.pose = g.pose && !instant ? { from: { pos: g.anchor.position.clone(), q: g.anchor.quaternion.clone() }, to: target, t0: now }
-                                : { from: target, to: target, t0: now };
-    g.marker.material.emissiveIntensity = ["crashed", "dead", "out"].includes(d.status) ? 0 : 0.4;
-    g.status = d.status;
-    g.mix = d.mix;
-    if (d.odom) g.ghost.position.copy(v3(d.odom));
-    g.ghost.visible = show("cOdom") && !!d.odom;
-    if (d.lidar && show("cLidar")) {
-      g.lidar.geometry.setAttribute("position", new THREE.Float32BufferAttribute(d.lidar, 3));
-      g.lidar.visible = true;
-    } else {
-      g.lidar.visible = false;
-    }
-    const dbg = d.debug || {};
-    const dv = show("cDebug");
-    if (dbg.path && dbg.path.length) { setLine(g.path, [d.odom || d.pos, ...dbg.path.slice().reverse()]); }
-    g.path.visible = dv && !!(dbg.path && dbg.path.length);
-    g.goal.visible = dv && !!dbg.goal;
-    if (dbg.goal) g.goal.position.copy(v3(dbg.goal));
-    if (dbg.points && dbg.points.length) {
-      g.pts.geometry.setAttribute("position", new THREE.Float32BufferAttribute(dbg.points.flat(), 3));
-    }
-    g.pts.visible = dv && !!(dbg.points && dbg.points.length);
-    if (dbg.map) g.map.geometry.setAttribute("position", new THREE.Float32BufferAttribute(dbg.map.flat(), 3));
-    g.map.visible = show("cMap") && !!g.map.geometry.attributes.position;
-    g.beam.position.copy(v3(d.pos)).add(new THREE.Vector3(0, 0, 15));
-    g.beam.visible = i === selected;
-
-    const el = $("drones").children[i];
-    el.querySelector(".st").textContent = STATUS_KO[d.status] || d.status;
-    el.querySelector(".mode").textContent = dbg.mode ? `모드: ${dbg.mode}` : "";
-    el.querySelector(".drift").textContent = d.odom
-      ? `추정 오차 ${Math.hypot(d.pos[0] - d.odom[0], d.pos[1] - d.odom[1], d.pos[2] - d.odom[2]).toFixed(2)} m`
-      : "오도메트리 꺼짐";
-    const b = el.querySelector(".batt");
-    b.style.width = `${100 * d.battery}%`;
-    b.style.background = d.battery > 0.4 ? "#51cf66" : d.battery > 0.2 ? "#fcc419" : "#ff6b6b";
-  });
-
-  const segs = [];
-  for (const [a, b] of msg.links) segs.push(...msg.drones[a].pos, ...msg.drones[b].pos);
-  for (const a of msg.base_links) segs.push(...msg.drones[a].pos, ...initMsg.base);
-  linkLines.geometry.setAttribute("position", new THREE.Float32BufferAttribute(segs, 3));
-  linkLines.visible = show("cLinks");
-
-  for (const [id, a] of Object.entries(artifactMeshes)) {
-    const found = msg.found.includes(Number(id));
-    a.marker.material.color.setHex(found ? 0x51cf66 : 0x868e96);
-    a.group.visible = found || show("cTruth");
-  }
-  updateFpvHud();
-}
-
-function onTrails(msg) {
-  msg.true.forEach((t, i) => { if (drones[i]) setLine(drones[i].trail, t); });
-  msg.odom.forEach((t, i) => { if (drones[i]) setLine(drones[i].odomTrail, t); });
-  drones.forEach((g) => { g.trail.visible = $("cTrail").checked; g.odomTrail.visible = $("cTrail").checked && $("cOdom").checked; });
-}
-
-function onDone(msg) {
-  $("final").style.display = "block";
-  $("finalText").textContent = JSON.stringify(msg.score, null, 1);
-}
-
-// ---------------------------------------------------------------- views
-// The main window and the inset each show one view: "map" (orbit camera over the whole cave),
-// "chase" (third person behind the selected drone) or "fpv" (its onboard camera).
-const mainView = () => $("mainView").value;
-const insetView = () => $("insetView").value;
-const inCave = (v) => v === "chase" || v === "fpv";
-
-function updateFpvHud() {
-  const d = lastState && lastState.drones[selected];
-  const v = inCave(mainView()) ? mainView() : insetView();
-  $("fpvhud").style.display = inCave(v) && drones[selected] ? "block" : "none";
-  if (!d) return;
-  const speed = Math.hypot(...(d.vel || [0, 0, 0]));
-  const gust = Math.hypot(...(d.aero || [0, 0, 0]));
-  $("fpvTitle").textContent = `${v === "fpv" ? "1인칭" : "3인칭"} · 드론 ${selected}`;
-  $("fpvSpd").textContent = `${speed.toFixed(2)} m/s`;
-  $("fpvClr").textContent = d.clear == null ? "> 1.4 m" : `${d.clear.toFixed(2)} m`;
-  $("fpvClr").className = d.clear != null && d.clear < 0.4 ? "warn" : "";
-  $("fpvGust").textContent = `${gust.toFixed(2)} m/s²`;
-  $("fpvAtt").textContent = `R ${(d.rp[0] * 57.3).toFixed(0)}° P ${(d.rp[1] * 57.3).toFixed(0)}°`;
-  $("fpvBat").textContent = `${(100 * d.battery).toFixed(0)} %`;
-  $("fpvHorizonBox").style.display = v === "fpv" ? "block" : "none";
-  const dead = ["crashed", "dead", "out"].includes(d.status);
-  $("fpvAlert").textContent = dead ? (STATUS_KO[d.status] || d.status) : "";
-  // Where the survivor is from here -- the coordinates every agent is given, so a pilot gets them too.
-  // ... and home, for the way back.
-  if (rescue && initMsg) {
-    const arrow = (name, t) => {
-      const dx = t[0] - d.pos[0], dy = t[1] - d.pos[1], dz = t[2] - d.pos[2];
-      const rel = Math.atan2(dy, dx) - d.yaw;               // bearing off the nose, counter-clockwise
-      return `${name} <span style="display:inline-block;transform:rotate(${-rel}rad);font-size:20px">⬆</span> ` +
-        `${Math.hypot(dx, dy, dz).toFixed(0)} m · 높이 ${dz >= 0 ? "+" : ""}${dz.toFixed(0)} m`;
-    };
-    $("fpvGoal").innerHTML = arrow("생존자", initMsg.artifacts[rescue.target].pos) + "<br>" + arrow("홈", initMsg.base);
-  }
-}
-
-function insetRect() {
-  const w = Math.min(560, Math.round(innerWidth * 0.38)), h = Math.round(w * 9 / 16);
-  return { x: innerWidth - w - 10, y: 44, w, h };
-}
-
-function placeCameras(dt) {
-  const g = drones[selected];
-  if (!g) return;
-  // Onboard camera (and the drone's lights, which hang off it) follow the selected drone.
-  fpvCam.position.copy(FPV_OFFSET).applyQuaternion(g.anchor.quaternion).add(g.anchor.position);
-  fpvCam.quaternion.copy(g.anchor.quaternion).multiply(CAM_IN_BODY);
-  // Chase camera: heading-only frame, eased so it swings smoothly, pulled in front of rock.
-  const yaw = new THREE.Euler().setFromQuaternion(g.anchor.quaternion, "ZYX").z;
-  const look = g.anchor.position.clone().add(new THREE.Vector3(0, 0, 0.15));
-  // Up against a ceiling the view from above-behind is rock: the camera ended up inside it and showed
-  // a grey screen. Try the chosen elevation, then level, then from below; take the first with most
-  // of the distance free, else the one with the most room, and stop short of the rock.
-  const rock = caveMeshes.map((c) => c.mesh);
-  let want = null, best = null;
-  for (const pitch of [chase.pitch, 0, -0.3]) {
-    const c = Math.cos(pitch);
-    const dir = new THREE.Vector3(-c * Math.cos(chase.yaw), -c * Math.sin(chase.yaw), Math.sin(pitch))
-      .applyAxisAngle(new THREE.Vector3(0, 0, 1), yaw);
-    chaseRay.set(look, dir);
-    chaseRay.far = chase.dist;
-    const hit = chaseRay.intersectObjects(rock, false)[0];
-    const free = hit ? hit.distance : chase.dist;
-    if (!best || free > best.free) best = { dir, free };
-    if (free >= 0.8 * chase.dist) { want = look.clone().addScaledVector(dir, free < chase.dist ? free - 0.25 : free); break; }
-  }
-  if (!want) want = look.clone().addScaledVector(best.dir, Math.max(best.free - 0.25, 0.1));
-  // Ease when following; jump when far (first use, or another drone was selected).
-  if (chaseCam.position.distanceTo(want) > Math.max(5, 2 * chase.dist)) chaseCam.position.copy(want);
-  else chaseCam.position.lerp(want, 1 - Math.exp(-dt * 6));
-  chaseCam.lookAt(look);
-}
-
-// Mouse input goes to whichever view is under the pointer: the orbit controls for the map,
-// our own orbit around the drone for a chase view, nothing for the onboard camera.
-function viewAt(x, y) {
-  const r = insetRect();
-  const inInset = insetView() !== "off" && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
-  return inInset ? insetView() : mainView();
-}
-let chaseDrag = null;
-const canvas = renderer.domElement;
-canvas.addEventListener("pointermove", (e) => {
-  if (chaseDrag) {
-    chase.yaw -= (e.clientX - chaseDrag.x) * 0.006;
-    chase.pitch = THREE.MathUtils.clamp(chase.pitch + (e.clientY - chaseDrag.y) * 0.006, -0.35, 1.45);
-    chaseDrag = { x: e.clientX, y: e.clientY };
-  } else {
-    controls.enabled = viewAt(e.clientX, e.clientY) === "map";
-  }
-}, { capture: true });
-canvas.addEventListener("pointerdown", (e) => {
-  controls.enabled = viewAt(e.clientX, e.clientY) === "map";
-  if (viewAt(e.clientX, e.clientY) === "chase") {
-    chaseDrag = { x: e.clientX, y: e.clientY };
-    canvas.setPointerCapture(e.pointerId);
-  }
-}, { capture: true });
-canvas.addEventListener("pointerup", () => { chaseDrag = null; }, { capture: true });
-canvas.addEventListener("wheel", (e) => {
-  if (viewAt(e.clientX, e.clientY) !== "chase") return;
-  e.preventDefault();
-  chase.dist = THREE.MathUtils.clamp(chase.dist * Math.exp(e.deltaY * 0.0012), 0.6, 15);
-}, { capture: true, passive: false });
-canvas.addEventListener("dblclick", (e) => {
-  if (viewAt(e.clientX, e.clientY) === "chase") Object.assign(chase, CHASE_DEFAULT);
-});
-
-function drawMap(r) {
-  camera.aspect = r.w / r.h;
-  camera.updateProjectionMatrix();
-  scene.background = SKY;
-  renderer.setViewport(r.x, innerHeight - r.y - r.h, r.w, r.h);
-  renderer.setScissor(r.x, innerHeight - r.y - r.h, r.w, r.h);
-  renderer.clear();
-  renderer.render(scene, camera);
-}
-
-function updateDaylight(dt) {
-  if (!caveMeshes.length || !drones[selected]) return;
-  // Daylight follows the share of the sky the camera can see, so a cave mouth stays half lit
-  // and it darkens gradually further in. Re-measured five times a second.
-  skyCheckIn -= dt;
-  if (skyCheckIn <= 0) {
-    skyCheckIn = 0.2;
-    const rock = caveMeshes.map((c) => c.mesh);
-    const free = SKY_DIRS.filter((d) => { roofRay.set(chaseCam.position, d); return !roofRay.intersectObjects(rock, false).length; });
-    skyOpen = Math.min(1.5 * free.length / SKY_DIRS.length, 1);
-  }
-  daylight += (skyOpen - daylight) * (1 - Math.exp(-dt * 3));
-}
-
-function drawInCave(view, r) {
-  const g = drones[selected];
-  const cam = view === "fpv" ? fpvCam : chaseCam;
-  cam.aspect = r.w / r.h;
-  cam.updateProjectionMatrix();
-
-  // Swap the scene into "camera" mode: solid rock, darkness, onboard lights, drones as models only.
-  const hidden = overlays.map((o) => o.visible);
-  overlays.forEach((o) => (o.visible = false));
-  const markers = drones.map((d) => d.marker.visible);
-  drones.forEach((d) => (d.marker.visible = !d.craft.children.length));
-  const artMarkers = Object.values(artifactMeshes).map((a) => a.marker.visible);
-  Object.values(artifactMeshes).forEach((a) => (a.marker.visible = !a.model));
-  const ownVis = g.anchor.visible;
-  if (view === "fpv") g.anchor.visible = false;
-  for (const c of caveMeshes) c.mesh.material = c.fpv;
-  const hemiI = hemi.intensity, sunI = sun.intensity;
-  const day = daylight;
-  hemi.intensity = THREE.MathUtils.lerp(0.35, 1.3, day) * LIGHT_GAIN;   // some fill light in the cave too
-  sun.intensity = THREE.MathUtils.lerp(0, 1.4, day) * LIGHT_GAIN;
-  flood.intensity = THREE.MathUtils.lerp(70, 8, day) * LIGHT_GAIN;    // onboard LEDs matter in the dark only
-  beam.intensity = THREE.MathUtils.lerp(120, 12, day) * LIGHT_GAIN;
-  scene.fog.near = THREE.MathUtils.lerp(12, 60, day);
-  scene.fog.far = THREE.MathUtils.lerp(80, 600, day);
-  scene.fog.color.setRGB(0, 0, 0).lerp(DAY_SKY, day);
-  scene.background = day > 0.02 ? new THREE.Color(0, 0, 0).lerp(DAY_SKY, day) : null;
-
-  renderer.setViewport(r.x, innerHeight - r.y - r.h, r.w, r.h);
-  renderer.setScissor(r.x, innerHeight - r.y - r.h, r.w, r.h);
-  renderer.setClearColor(0x000000, 1);
-  renderer.clear();
-  renderer.render(scene, cam);
-
-  overlays.forEach((o, k) => (o.visible = hidden[k]));
-  drones.forEach((d, k) => (d.marker.visible = markers[k]));
-  Object.values(artifactMeshes).forEach((a, k) => (a.marker.visible = artMarkers[k]));
-  g.anchor.visible = ownVis;
-  for (const c of caveMeshes) c.mesh.material = c.over;
-  hemi.intensity = hemiI;
-  sun.intensity = sunI;
-  flood.intensity = beam.intensity = 0;
-  scene.fog.near = 1e5;
-  scene.fog.far = 1e5 + 1;
-  scene.fog.color.setRGB(0, 0, 0);
-}
-
-function drawView(view, r) {
-  if (view === "map") drawMap(r);
-  else if (drones[selected]) drawInCave(view, r);
-}
-
-function placeFpvHud(r) {
-  const el = $("fpvhud");
-  Object.assign(el.style, { left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
-  el.classList.toggle("full", r.w === innerWidth);
-  const d = lastState && lastState.drones[selected];
-  if (d) {
-    // Artificial horizon: tilts with roll, slides with pitch (vertical FOV maps to the view height).
-    const px = (d.rp[1] / THREE.MathUtils.degToRad(fpvCam.fov)) * r.h;
-    $("fpvHorizon").style.transform = `translateY(${px}px) rotate(${-d.rp[0]}rad)`;
-  }
-}
-
-// ---------------------------------------------------------------- socket
 function connect() {
   const port = new URLSearchParams(location.search).get("ws") || "8765";
   ws = new WebSocket(`ws://${location.hostname}:${port}`);
-  ws.onopen = () => { $("status").textContent = "연결됨"; ws.send(JSON.stringify({ cmd: "viewer" })); };
-  ws.onclose = () => { $("status").textContent = "연결 끊김 (서버 종료?)"; };
+  ws.onopen = () => { $("status").textContent = "connected"; $("status").className = "conn on"; send({ cmd: "viewer" }); };
+  ws.onclose = () => { $("status").textContent = "disconnected"; $("status").className = "conn off"; };
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === "init") onInit(msg);
     else if (msg.type === "state") onState(msg);
     else if (msg.type === "history") onHistory(msg);
-    else if (msg.type === "trails") { if (replayAt == null) onTrails(msg); }
+    else if (msg.type === "trails") { if (replayAt === null) onTrails(msg); }
     else if (msg.type === "done") onDone(msg);
   };
 }
-loadDroneModel();
 connect();
+
+function seg(id, pick) {
+  $(id).addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) pick(b.dataset.v); });
+}
+function segSelect(id, v) { for (const b of $(id).children) b.classList.toggle("on", b.dataset.v === String(v)); }
 
 let paused = false;
 $("pause").onclick = () => {
   paused = !paused;
-  ws.send(JSON.stringify({ cmd: "pause", value: paused }));
-  $("pause").textContent = paused ? "재개" : "일시정지";
+  send({ cmd: "pause", value: paused });
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("pause").classList.toggle("paused", paused);
 };
-$("speed").onchange = (e) => ws.send(JSON.stringify({ cmd: "speed", value: Number(e.target.value) }));
-$("opacity").oninput = (e) => caveMats.forEach((m) => { m.opacity = e.target.value / 100; m.depthWrite = e.target.value > 90; });
+seg("speed", (v) => { send({ cmd: "speed", value: Number(v) }); segSelect("speed", v); });
+seg("rpSpeed", (v) => { replaySpeed = Number(v); segSelect("rpSpeed", v); });
+seg("cam", setCamMode);
+seg("caveStyle", (v) => setCaveStyle(v));
+$("opacity").oninput = applyCave;
+// One window per sensor, for the drone selected in the HUD (viewer/sensors.html).
+const SENSOR_WIN = { lidar: [960, 820], imu: [900, 560], alt: [900, 560], odom: [1000, 480], status: [760, 420] };
+seg("sensors", (kind) => {
+  const [w, h] = SENSOR_WIN[kind], port = new URLSearchParams(location.search).get("ws") || "8765";
+  window.open(`sensors.html?sensor=${kind}&drone=${selected}&ws=${port}`, `sensor_${kind}_${selected}`, `width=${w},height=${h}`);
+});
+document.querySelectorAll("#dock input[type=checkbox]").forEach((c) => c.addEventListener("change", applyToggles));
 $("final").onclick = () => { $("final").style.display = "none"; };
-// Start views can come from the URL, e.g. /viewer/?main=chase&inset=map
-if (new URLSearchParams(location.search).get("follow") === "1") $("cFollow").checked = true;
-for (const k of ["main", "inset"]) {
-  const v = new URLSearchParams(location.search).get(k);
-  if (v) $(`${k}View`).value = v;
-}
-$("mainView").onchange = $("insetView").onchange = updateFpvHud;
-const swapViews = () => {
-  if (insetView() === "off") return;
-  [$("mainView").value, $("insetView").value] = [insetView(), mainView()];
-  updateFpvHud();
-};
-$("swapView").onclick = swapViews;
+controls.addEventListener("start", () => { intro = null; });
+
+const CAMS = ["orbit", "follow", "chase", "fpv"];
+let beforeFpv = "orbit";
 addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
-  if (e.key === "v" || e.key === "V") swapViews();
-  const n = Number(e.key);
-  if (n >= 1 && n <= drones.length) $("drones").children[n - 1].click();
+  if (e.target.tagName === "INPUT" && e.target.type !== "checkbox" && e.target.type !== "range") return;
+  if (/^Digit[1-9]$/.test(e.code)) select(Number(e.code.slice(5)) - 1);
+  else if (e.code === "KeyC") setCamMode(CAMS[(CAMS.indexOf(camMode) + 1) % CAMS.length]);
+  else if (e.code === "KeyV") {          // FPV and back, as in the stock viewer
+    if (camMode !== "fpv") beforeFpv = camMode;
+    setCamMode(camMode === "fpv" ? beforeFpv : "fpv");
+  }
+  else if (e.code === "KeyH") document.body.classList.toggle("ui-hidden");
+  else if (e.code === "Space") { e.preventDefault(); $("pause").click(); }
 });
 
 // Keys held down go to the server, for the keyboard pilot (agents.manual); other agents ignore them.
 const PILOT_KEYS = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright", "w", "s", "a", "d", "l", "shift"]);
 const held = new Set();
-const sendKeys = () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ cmd: "keys", keys: [...held] })); };
-const pilotKey = (e, down) => {
-  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+function pilotKey(e, down) {
+  if (e.target.tagName === "INPUT" && e.target.type !== "checkbox" && e.target.type !== "range") return;
   const k = e.key.toLowerCase();
   if (!PILOT_KEYS.has(k)) return;
-  if (k.startsWith("arrow")) e.preventDefault();       // no page scrolling
+  if (k.startsWith("arrow")) e.preventDefault();       // no page scrolling, no slider nudging
   const had = held.has(k);
-  down ? held.add(k) : held.delete(k);
-  if (had !== down) sendKeys();
-};
+  if (down) held.add(k); else held.delete(k);
+  if (had !== down) send({ cmd: "keys", keys: [...held] });
+}
 addEventListener("keydown", (e) => pilotKey(e, true));
 addEventListener("keyup", (e) => pilotKey(e, false));
-addEventListener("blur", () => { held.clear(); sendKeys(); });
+addEventListener("blur", () => { held.clear(); send({ cmd: "keys", keys: [] }); });
 
-// One separate window per sensor, for the drone selected in the HUD.
-const SENSOR_WIN = { lidar: [960, 820], imu: [900, 560], alt: [900, 560], odom: [1000, 480], status: [760, 420] };
-document.querySelectorAll("[data-sensor]").forEach((b) => {
-  b.onclick = () => {
-    const kind = b.dataset.sensor, [w, h] = SENSOR_WIN[kind];
-    const port = new URLSearchParams(location.search).get("ws") || "8765";
-    window.open(`sensors.html?sensor=${kind}&drone=${selected}&ws=${port}`, `sensor_${kind}_${selected}`,
-                `width=${w},height=${h}`);
-  };
-});
-
-renderer.setScissorTest(true);
-let lastFrame = performance.now();
+const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const now = performance.now();
-  const dt = Math.min((now - lastFrame) / 1000, 0.1);
-  lastFrame = now;
-  for (const g of drones) {
-    if (!g.pose) continue;
-    const a = Math.min((now - g.pose.t0) / stateDt, 1);
-    g.anchor.position.lerpVectors(g.pose.from.pos, g.pose.to.pos, a);
-    g.anchor.quaternion.slerpQuaternions(g.pose.from.q, g.pose.to.q, a);
-    const far = camera.position.distanceTo(g.anchor.position) > 7 || !g.craft.children.length;
-    g.marker.visible = far;
-    // Quadrotor mixer: each rotor gets a quarter of the thrust, more or less by where it sits
-    // (roll: left/right, pitch: front/back) and by its spin direction (yaw). Speed ~ sqrt(thrust).
-    const [T, roll, pitch, yaw] = g.mix || [0, 0, 0, 0];
-    for (const r of g.rotors || []) {
-      const u = r.userData;
-      const share = Math.max(T * (1 + MIX_TILT * (roll * u.y - pitch * u.x) - MIX_YAW * yaw * u.spin), 0);
-      u.w += (Math.sqrt(share) - u.w) * (1 - Math.exp(-dt * 8));   // motors spin up and down, not instantly
-      r.rotation.y += u.spin * PROP_SPEED * u.w * dt;
-    }
-  }
-  for (const a of Object.values(artifactMeshes)) {
-    a.marker.visible = !a.model || camera.position.distanceTo(a.group.position) > 15;
-  }
-  if ($("cFollow").checked && drones[selected]) {
-    const delta = drones[selected].anchor.position.clone().sub(controls.target);
-    controls.target.add(delta);
-    camera.position.add(delta);
-  }
-  controls.update();
-  placeCameras(dt);
+  const dt = Math.min(clock.getDelta(), 0.1), t = clock.elapsedTime;
+  caveU.uTime.value = t;
+  updateDrones(dt, t);
+  updateLinks(dt);
+  updateScene(dt, t);
+  flushMap();
+  updateCamera(dt);
   updateDaylight(dt);
-
-  const full = { x: 0, y: 0, w: innerWidth, h: innerHeight };
-  const main = mainView(), inset = insetView();
-  drawView(main, full);
-  if (inset !== "off") drawView(inset, insetRect());
-  if (inCave(main)) placeFpvHud(full);
-  else if (inCave(inset)) placeFpvHud(insetRect());
+  composer.render(dt);
+  labelRenderer.render(scene, camera);
 });

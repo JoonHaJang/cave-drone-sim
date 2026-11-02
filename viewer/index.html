@@ -1,109 +1,247 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cave Drone Sim</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1014; color: #d8dee6;
-               font: 13px/1.4 system-ui, "Malgun Gothic", sans-serif; }
-  #hud { position: absolute; top: 10px; left: 10px; width: 290px; background: rgba(16,20,26,.88);
-         border: 1px solid #2a323d; border-radius: 6px; padding: 10px 12px; }
-  #hud h1 { font-size: 14px; margin: 0 0 6px; }
-  .row { display: flex; justify-content: space-between; }
-  .drone { margin-top: 6px; padding-top: 6px; border-top: 1px solid #2a323d; cursor: pointer; }
-  .drone.sel { background: rgba(80,120,170,.15); }
-  .bar { height: 5px; background: #2a323d; border-radius: 3px; margin-top: 3px; }
-  .bar > div { height: 100%; border-radius: 3px; }
-  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
-  #controls { position: absolute; bottom: 10px; left: 10px; background: rgba(16,20,26,.88);
-              border: 1px solid #2a323d; border-radius: 6px; padding: 8px 10px; }
-  #controls label { margin-right: 10px; white-space: nowrap; }
-  button, select { background: #222a34; color: #d8dee6; border: 1px solid #3a4452; border-radius: 4px; padding: 2px 8px; }
-  #status { position: absolute; top: 10px; right: 10px; background: rgba(16,20,26,.88);
-            border: 1px solid #2a323d; border-radius: 6px; padding: 6px 10px; }
-  #sensorbtns { margin-top: 6px; padding-top: 6px; border-top: 1px solid #2a323d; }
-  #sensorbtns button { margin: 2px 2px 0 0; }
-  #final { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
-           background: rgba(16,20,26,.95); border: 1px solid #4a5868; border-radius: 8px; padding: 16px 20px; }
-  #final pre { margin: 8px 0 0; }
-  .muted { color: #8793a3; }
-  #replay { position: absolute; bottom: 58px; left: 10px; right: 10px; display: flex; gap: 8px; align-items: center;
-             background: rgba(16,20,26,.88); border: 1px solid #2a323d; border-radius: 6px; padding: 6px 10px; }
-  #replay input[type=range] { flex: 1; }
-  #replay .live { color: #ff6b6b; font-weight: bold; }
-  #fpvhud { display: none; position: absolute; pointer-events: none; overflow: hidden;
-            border: 1px solid #4a5868; border-radius: 4px; box-sizing: border-box;
-            font: 12px/1.35 ui-monospace, Consolas, monospace; color: #b8f5c8; text-shadow: 0 0 3px #000; }
-  #fpvhud .tl { position: absolute; top: 6px; left: 8px; }
-  #fpvhud .tr { position: absolute; top: 6px; right: 8px; text-align: right; }
-  #fpvhud .tl, #fpvhud .tr { background: rgba(10,14,20,.55); border-radius: 4px; padding: 4px 8px; }
-  /* Full-window camera view: keep the readout clear of the side panels (#hud ends at 326 px,
-     #status sits top right). */
-  #fpvhud.full { border: 0; }
-  #fpvhud.full .tl { top: 12px; left: 340px; }
-  #fpvhud.full .tr { top: 52px; right: 12px; }
-  #fpvhud .warn { color: #ff6b6b; font-weight: bold; }
-  #fpvCross { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
-              border: 1px solid rgba(184,245,200,.7); border-radius: 50%; }
-  #fpvHorizonBox { position: absolute; left: 0; right: 0; top: 50%; height: 0; }
-  #fpvHorizon { position: absolute; left: 30%; right: 30%; top: 0; border-top: 1px dashed rgba(184,245,200,.6); }
-  #fpvAlert { position: absolute; top: 40%; width: 100%; text-align: center; font-size: 22px; color: #ff6b6b; }
+  :root {
+    --bg: #05070b; --panel: rgba(12, 17, 26, .66); --line: rgba(160, 190, 230, .12);
+    --text: #e3eaf3; --muted: #7f8ea3; --accent: #22d3ee; --good: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+               font: 13px/1.45 Inter, system-ui, "Segoe UI", sans-serif; }
+  canvas { display: block; }
+  #labels { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .panel { position: absolute; z-index: 2; background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+           backdrop-filter: blur(14px) saturate(140%); -webkit-backdrop-filter: blur(14px) saturate(140%);
+           box-shadow: 0 12px 32px rgba(0, 0, 0, .35); }
+  .muted { color: var(--muted); }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  body.ui-hidden .panel { display: none; }
+
+  /* ---------------------------------------------------------- mission panel */
+  #hud { top: 14px; left: 14px; width: 300px; padding: 14px; max-height: calc(100% - 150px); overflow-y: auto; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo { width: 30px; height: 30px; border-radius: 9px; flex: none;
+          background: conic-gradient(from 200deg, #8b5cf6, #3b82f6, #22d3ee, #8b5cf6);
+          box-shadow: 0 0 18px rgba(34, 211, 238, .45); position: relative; }
+  .logo::after { content: ""; position: absolute; inset: 9px; border-radius: 50%; background: #0b111a; }
+  .title { font-weight: 700; letter-spacing: .14em; font-size: 12px; }
+  .sub { font-size: 11px; color: var(--muted); }
+  .conn::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+                  background: var(--warn); margin: 0 4px 1px 0; }
+  .conn.on::before { background: var(--good); box-shadow: 0 0 8px var(--good); }
+  .conn.off::before { background: var(--bad); }
+  .clock { margin-top: 14px; font-family: var(--mono); font-size: 26px; font-weight: 700; letter-spacing: -.02em; }
+  .clock small { font-size: 13px; font-weight: 500; color: var(--muted); }
+  .progress { height: 4px; border-radius: 4px; background: rgba(255, 255, 255, .07); overflow: hidden; margin-top: 4px; }
+  #tbar { height: 100%; width: 0; background: linear-gradient(90deg, #8b5cf6, #22d3ee); border-radius: 4px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 12px; }
+  .stat { background: rgba(255, 255, 255, .035); border: 1px solid var(--line); border-radius: 9px; padding: 6px 7px; }
+  .stat label { display: block; font-size: 10px; color: var(--muted); }
+  .stat b { font-family: var(--mono); font-size: 15px; }
+  .stat.score b { color: var(--accent); text-shadow: 0 0 12px rgba(34, 211, 238, .5); }
+  .section { margin: 14px 0 6px; font-size: 10px; letter-spacing: .12em; color: var(--muted); }
+
+  .drone { display: flex; gap: 10px; padding: 8px 9px; border-radius: 10px; border: 1px solid transparent;
+           cursor: pointer; transition: background .15s, border-color .15s; }
+  .drone + .drone { margin-top: 4px; }
+  .drone:hover { background: rgba(255, 255, 255, .04); }
+  .drone.sel { background: rgba(34, 211, 238, .07); border-color: rgba(34, 211, 238, .35); }
+  .swatch { width: 4px; border-radius: 4px; background: var(--c); box-shadow: 0 0 10px var(--c); flex: none; }
+  .dmain { flex: 1; min-width: 0; }
+  .dname { font-weight: 700; }
+  .chip { font-size: 10px; padding: 1px 7px; border-radius: 99px; border: 1px solid currentColor; }
+  .chip.flying { color: var(--accent); } .chip.landing { color: var(--warn); } .chip.landed { color: var(--good); }
+  .chip.crashed, .chip.dead, .chip.out { color: var(--bad); }
+  .small { font-size: 11px; }
+  .link { font-size: 10px; color: var(--muted); opacity: .45; }
+  .link.on { color: var(--good); opacity: 1; }
+  .bar { height: 4px; background: rgba(255, 255, 255, .07); border-radius: 4px; margin-top: 5px; overflow: hidden; }
+  .batt { height: 100%; border-radius: 4px; transition: width .3s; }
+  .hint { margin-top: 12px; font-size: 10.5px; color: var(--muted); }
+  kbd { font-family: var(--mono); font-size: 10px; padding: 0 4px; border: 1px solid var(--line);
+        border-radius: 4px; background: rgba(255, 255, 255, .05); }
+
+  /* ---------------------------------------------------------- event log */
+  #log { top: 14px; right: 14px; width: 270px; padding: 12px 14px; }
+  #events { list-style: none; margin: 6px 0 0; padding: 0; }
+  #events li { display: flex; gap: 8px; padding: 4px 0; border-top: 1px solid var(--line); font-size: 12px;
+               animation: slide .35s ease-out; }
+  #events li:first-child { border-top: 0; }
+  #events li:nth-child(n+5) { opacity: .55; }
+  #events .t { font-family: var(--mono); color: var(--muted); font-size: 11px; min-width: 38px; }
+  #events .good { color: var(--good); } #events .bad { color: var(--bad); } #events .warn { color: var(--warn); }
+  @keyframes slide { from { opacity: 0; transform: translateX(10px); } }
+
+  /* ---------------------------------------------------------- control dock */
+  #dock { left: 50%; bottom: 14px; transform: translateX(-50%); padding: 10px 12px; display: flex; flex-direction: column;
+          gap: 8px; width: max-content; max-width: calc(100% - 28px); }
+  #dock .line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; justify-content: center; }
+  .group { display: flex; align-items: center; gap: 6px; }
+  .group > span { font-size: 10px; color: var(--muted); letter-spacing: .08em; }
+  .seg { display: inline-flex; background: rgba(255, 255, 255, .04); border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
+  .seg button, #pause { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 0; border-radius: 7px;
+                        padding: 4px 9px; cursor: pointer; }
+  .seg button:hover { color: var(--text); }
+  .seg button.on { color: #061016; background: var(--accent); font-weight: 700; }
+  #pause { color: #061016; background: var(--accent); font-weight: 700; min-width: 76px; }
+  #pause.paused { background: var(--warn); }
+  .toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); cursor: pointer;
+            padding: 3px 9px; border-radius: 99px; border: 1px solid var(--line); user-select: none; }
+  .toggle input { display: none; }
+  .toggle::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: rgba(255, 255, 255, .18); }
+  .toggle:has(input:checked) { color: var(--text); border-color: rgba(34, 211, 238, .4); }
+  .toggle:has(input:checked)::before { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  input[type=range] { accent-color: var(--accent); width: 90px; }
+  #rpBar { flex: 1; min-width: 200px; }
+  #rpLive.live { color: var(--bad); font-weight: 700; }
+
+  #sensors { flex-wrap: wrap; }
+  #sensors button { padding: 4px 7px; }
+
+  /* ---------------------------------------------------------- FPV / chase telemetry */
+  #tele { display: none; top: 14px; left: 50%; transform: translateX(-50%); padding: 8px 14px; gap: 18px; }
+  body.inside #tele { display: flex; }
+  #tele span { display: flex; flex-direction: column; align-items: center; white-space: nowrap; }
+  @media (max-width: 1100px) { #tele { left: auto; right: 14px; top: 50%; transform: translateY(-50%); flex-direction: column; gap: 8px; } }
+  #tele label { font-size: 9.5px; letter-spacing: .12em; color: var(--muted); }
+  #tele b { font-family: var(--mono); font-size: 14px; }
+  #tele b.warn { color: var(--bad); text-shadow: 0 0 10px var(--bad); }
+  #tele .goal { display: none; }
+  body.rescue #tele .goal { display: flex; }
+  #tele i { display: inline-block; font-style: normal; color: var(--accent); }
+
+  /* ---------------------------------------------------------- 3D labels */
+  .tag { font: 700 10px/1 var(--mono); padding: 3px 6px; border-radius: 6px; color: #fff; white-space: nowrap;
+         background: rgba(8, 12, 18, .72); border: 1px solid var(--c, #fff); transform: translateY(-14px); }
+  .tag.dead { opacity: .6; text-decoration: line-through; }
+  .tag.art { font-family: Inter, sans-serif; font-weight: 500; border-color: rgba(255, 255, 255, .25); color: #c6d0dc; }
+  .tag.art.found { border-color: var(--good); color: var(--good); }
+  .tag.base { border-color: var(--accent); color: var(--accent); letter-spacing: .1em; }
+  body.no-labels #labels { display: none; }
+
+  /* ---------------------------------------------------------- final card */
+  #final { display: none; position: absolute; inset: 0; background: rgba(3, 5, 9, .55); backdrop-filter: blur(3px); cursor: pointer; }
+  #final .card { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 360px; padding: 22px 24px;
+                 text-align: center; animation: pop .4s cubic-bezier(.2, 1.4, .4, 1); }
+  @keyframes pop { from { transform: translate(-50%, -50%) scale(.85); opacity: 0; } }
+  #final .label { font-size: 11px; letter-spacing: .2em; color: var(--muted); }
+  #fScore { font: 700 54px/1.1 var(--mono); color: var(--accent); text-shadow: 0 0 24px rgba(34, 211, 238, .55); margin: 6px 0 14px; }
+  #fGrid { display: grid; grid-template-columns: 1fr auto auto; gap: 6px 12px; text-align: left; font-size: 12.5px; }
+  #fGrid .pts { font-family: var(--mono); color: var(--accent); text-align: right; }
+  #fGrid .v { font-family: var(--mono); text-align: right; }
+  #fGrid hr { grid-column: 1 / -1; border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
+
+  #hud { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .15) transparent; }
+  @media (max-width: 900px) { #log { display: none; } #hud { width: 260px; } }
+  @media (max-height: 700px) { .hint { display: none; } .clock { margin-top: 8px; font-size: 22px; } }
 </style>
 </head>
 <body>
-<div id="hud">
-  <h1>Cave Drone Sim <span class="muted" id="mapname"></span></h1>
-  <div class="row"><span>시간</span><span id="time">-</span></div>
-  <div class="row"><span id="lScore">점수</span><span id="score">-</span></div>
-  <div class="row"><span id="lArts">목표물</span><span id="arts">-</span></div>
-  <div class="row"><span id="lCov">탐사율</span><span id="cov">-</span></div>
+<div id="hud" class="panel">
+  <div class="row">
+    <div class="brand">
+      <div class="logo"></div>
+      <div><div class="title">CAVE DRONE SIM</div><div class="sub"><span id="mapname">-</span> · <span id="status" class="conn">connecting</span></div></div>
+    </div>
+  </div>
+  <div class="clock"><span id="time">0.0</span><small> / <span id="tmax">600</span> s</small></div>
+  <div class="progress"><div id="tbar"></div></div>
+  <div class="stats">
+    <div class="stat score"><label id="lScore">Score</label><b id="score">0</b></div>
+    <div class="stat"><label id="lArts">Artifacts</label><b id="arts">0/0</b></div>
+    <div class="stat"><label>Coverage</label><b id="cov">0%</b></div>
+    <div class="stat"><label>Home</label><b id="ret">0</b></div>
+  </div>
+  <div class="section">DRONES</div>
   <div id="drones"></div>
-  <div id="sensorbtns">
-    <div class="muted" style="margin:8px 0 4px">선택한 드론의 센서 창 열기</div>
-    <button data-sensor="lidar">LiDAR</button>
-    <button data-sensor="imu">IMU</button>
-    <button data-sensor="alt">고도</button>
-    <button data-sensor="odom">위치 추정</button>
-    <button data-sensor="status">상태</button>
+  <div class="section">SENSOR WINDOWS · SELECTED DRONE</div>
+  <div class="seg" id="sensors">
+    <button data-v="lidar">LiDAR</button><button data-v="imu">IMU</button><button data-v="alt">Altitude</button>
+    <button data-v="odom">Odometry</button><button data-v="status">Status</button>
+  </div>
+  <div class="hint"><kbd>1</kbd>–<kbd>9</kbd> select drone · <kbd>C</kbd> camera · <kbd>V</kbd> FPV · <kbd>Space</kbd> pause · <kbd>H</kbd> hide UI<br>
+    Keyboard pilot (<code>agents.manual</code>): <kbd>↑</kbd><kbd>↓</kbd> fly · <kbd>←</kbd><kbd>→</kbd> turn · <kbd>A</kbd><kbd>D</kbd> strafe ·
+    <kbd>W</kbd><kbd>S</kbd> climb · <kbd>Shift</kbd> fast · <kbd>L</kbd> land</div>
+</div>
+
+<div id="tele" class="panel">
+  <span><label>SPEED</label><b id="tSpd">-</b></span>
+  <span><label>WALL</label><b id="tClr">-</b></span>
+  <span><label>GUST</label><b id="tGust">-</b></span>
+  <span><label>ROLL · PITCH</label><b id="tAtt">-</b></span>
+  <span><label>BATTERY</label><b id="tBat">-</b></span>
+  <span class="goal"><label>SURVIVOR</label><b id="tSurv">-</b></span>
+  <span class="goal"><label>HOME</label><b id="tHome">-</b></span>
+</div>
+
+<div id="log" class="panel">
+  <div class="section" style="margin:0">MISSION LOG</div>
+  <ul id="events"></ul>
+</div>
+
+<div id="dock" class="panel">
+  <div class="line">
+    <button id="pause">Pause</button>
+    <div class="group"><span>SPEED</span>
+      <div class="seg" id="speed">
+        <button data-v="0.5">0.5x</button><button data-v="1" class="on">1x</button><button data-v="2">2x</button>
+        <button data-v="5">5x</button><button data-v="0">Max</button>
+      </div>
+    </div>
+    <div class="group"><span>CAMERA</span>
+      <div class="seg" id="cam">
+        <button data-v="orbit" class="on">Overview</button><button data-v="follow">Follow</button>
+        <button data-v="chase">Chase</button><button data-v="fpv">FPV</button>
+      </div>
+    </div>
+    <div class="group"><span>CAVE</span>
+      <div class="seg" id="caveStyle">
+        <button data-v="holo" class="on">Hologram</button><button data-v="rock">Rock</button><button data-v="off">Hidden</button>
+      </div>
+      <input type="range" id="opacity" min="0" max="100" value="70" title="Cave brightness / opacity">
+    </div>
+  </div>
+  <div class="line">
+    <label class="toggle"><input type="checkbox" id="cTruth" checked>Ground truth</label>
+    <label class="toggle"><input type="checkbox" id="cLidar" checked>LiDAR</label>
+    <label class="toggle"><input type="checkbox" id="cMap" checked>Map</label>
+    <label class="toggle"><input type="checkbox" id="cOdom" checked>Odometry</label>
+    <label class="toggle"><input type="checkbox" id="cTrail" checked>Trails</label>
+    <label class="toggle"><input type="checkbox" id="cLinks" checked>Comms</label>
+    <label class="toggle"><input type="checkbox" id="cDebug" checked>Agent debug</label>
+    <label class="toggle"><input type="checkbox" id="cAgentMap" checked>Agent map</label>
+    <label class="toggle"><input type="checkbox" id="cLabels" checked>Labels</label>
+    <label class="toggle"><input type="checkbox" id="cBloom" checked>Glow</label>
+  </div>
+  <div class="line" id="replay">
+    <div class="seg"><button id="rpPlay" title="Replay: play / pause">▶</button></div>
+    <input type="range" id="rpBar" min="0" max="0" value="0" title="Drag to scrub back through the run">
+    <span id="rpTime" class="mono muted small">-</span>
+    <div class="seg" id="rpSpeed">
+      <button data-v="1" class="on">1×</button><button data-v="4">4×</button><button data-v="16">16×</button>
+    </div>
+    <div class="seg"><button id="rpLive" class="live">● Live</button></div>
   </div>
 </div>
-<div id="status">연결 중...</div>
-<div id="fpvhud">
-  <div class="tl"><b id="fpvTitle">FPV</b><br>속도 <span id="fpvSpd">-</span><br>벽까지 <span id="fpvClr">-</span><br>교란 <span id="fpvGust">-</span>
-    <div id="fpvGoal"></div></div>
-  <div class="tr"><span id="fpvAtt">-</span><br>배터리 <span id="fpvBat">-</span></div>
-  <div id="fpvCross"></div>
-  <div id="fpvHorizonBox"><div id="fpvHorizon"></div></div>
-  <div id="fpvAlert"></div>
+
+<div id="final">
+  <div class="card panel">
+    <div class="label" id="fLabel">MISSION COMPLETE</div>
+    <div id="fScore">0</div>
+    <div id="fGrid"></div>
+    <div class="hint">Click anywhere to close</div>
+  </div>
 </div>
-<div id="controls">
-  <button id="pause">일시정지</button>
-  <select id="speed">
-    <option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option>
-    <option value="5">5x</option><option value="0">최대</option>
-  </select>
-  <label><input type="checkbox" id="cTruth" checked> 목표물 정답</label>
-  <label><input type="checkbox" id="cLidar" checked> LiDAR</label>
-  <label><input type="checkbox" id="cOdom" checked> 추정 위치</label>
-  <label><input type="checkbox" id="cTrail" checked> 궤적</label>
-  <label><input type="checkbox" id="cLinks" checked> 통신</label>
-  <label><input type="checkbox" id="cDebug" checked> 에이전트 디버그</label>
-  <label><input type="checkbox" id="cMap" checked> 에이전트 지도</label>
-  <label><input type="checkbox" id="cFollow"> 선택 드론 따라가기</label>
-  <label>메인 <select id="mainView"><option value="map" selected>전체 맵</option><option value="chase">3인칭</option><option value="fpv">1인칭</option></select></label>
-  <label>작은 창 <select id="insetView"><option value="off">끄기</option><option value="map">전체 맵</option><option value="chase" selected>3인칭</option><option value="fpv">1인칭</option></select></label>
-  <button id="swapView">화면 바꾸기 (V)</button>
-  <span class="muted" title="3인칭 화면 위에서: 드래그 = 드론 주위로 회전, 휠 = 거리, 더블클릭 = 기본 시점">3인칭: 드래그·휠·더블클릭</span>
-  <label>동굴 <input type="range" id="opacity" min="0" max="100" value="35" style="width:80px"></label>
-</div>
-<div id="replay">
-  <button id="rpPlay" title="되돌려 보는 중: 재생 / 멈춤">▶</button>
-  <input type="range" id="rpBar" min="0" max="0" value="0">
-  <span id="rpTime">-</span>
-  <select id="rpSpeed" title="되돌려 보기 재생 속도"><option value="1">1×</option><option value="4">4×</option><option value="16">16×</option></select>
-  <button id="rpLive">● 실시간</button>
-</div>
-<div id="final"><b>임무 종료</b><pre id="finalText"></pre></div>
+
 <script type="importmap">
 { "imports": {
   "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
