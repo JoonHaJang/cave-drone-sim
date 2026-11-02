@@ -60,7 +60,7 @@
   .dname { font-weight: 700; }
   .chip { font-size: 10px; padding: 1px 7px; border-radius: 99px; border: 1px solid currentColor; }
   .chip.flying { color: var(--accent); } .chip.landing { color: var(--warn); } .chip.landed { color: var(--good); }
-  .chip.crashed, .chip.dead { color: var(--bad); }
+  .chip.crashed, .chip.dead, .chip.out { color: var(--bad); }
   .small { font-size: 11px; }
   .link { font-size: 10px; color: var(--muted); opacity: .45; }
   .link.on { color: var(--good); opacity: 1; }
@@ -101,6 +101,8 @@
   .toggle:has(input:checked) { color: var(--text); border-color: rgba(34, 211, 238, .4); }
   .toggle:has(input:checked)::before { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
   input[type=range] { accent-color: var(--accent); width: 90px; }
+  #rpBar { flex: 1; min-width: 200px; }
+  #rpLive.live { color: var(--bad); font-weight: 700; }
 
   #sensors { flex-wrap: wrap; }
   #sensors button { padding: 4px 7px; }
@@ -113,6 +115,9 @@
   #tele label { font-size: 9.5px; letter-spacing: .12em; color: var(--muted); }
   #tele b { font-family: var(--mono); font-size: 14px; }
   #tele b.warn { color: var(--bad); text-shadow: 0 0 10px var(--bad); }
+  #tele .goal { display: none; }
+  body.rescue #tele .goal { display: flex; }
+  #tele i { display: inline-block; font-style: normal; color: var(--accent); }
 
   /* ---------------------------------------------------------- 3D labels */
   .tag { font: 700 10px/1 var(--mono); padding: 3px 6px; border-radius: 6px; color: #fff; white-space: nowrap;
@@ -151,8 +156,8 @@
   <div class="clock"><span id="time">0.0</span><small> / <span id="tmax">600</span> s</small></div>
   <div class="progress"><div id="tbar"></div></div>
   <div class="stats">
-    <div class="stat score"><label>Score</label><b id="score">0</b></div>
-    <div class="stat"><label>Artifacts</label><b id="arts">0/0</b></div>
+    <div class="stat score"><label id="lScore">Score</label><b id="score">0</b></div>
+    <div class="stat"><label id="lArts">Artifacts</label><b id="arts">0/0</b></div>
     <div class="stat"><label>Coverage</label><b id="cov">0%</b></div>
     <div class="stat"><label>Home</label><b id="ret">0</b></div>
   </div>
@@ -163,7 +168,9 @@
     <button data-v="lidar">LiDAR</button><button data-v="imu">IMU</button><button data-v="alt">Altitude</button>
     <button data-v="odom">Odometry</button><button data-v="status">Status</button>
   </div>
-  <div class="hint"><kbd>1</kbd>–<kbd>9</kbd> select drone · <kbd>C</kbd> camera · <kbd>Space</kbd> pause · <kbd>H</kbd> hide UI</div>
+  <div class="hint"><kbd>1</kbd>–<kbd>9</kbd> select drone · <kbd>C</kbd> camera · <kbd>V</kbd> FPV · <kbd>Space</kbd> pause · <kbd>H</kbd> hide UI<br>
+    Keyboard pilot (<code>agents.manual</code>): <kbd>↑</kbd><kbd>↓</kbd> fly · <kbd>←</kbd><kbd>→</kbd> turn · <kbd>A</kbd><kbd>D</kbd> strafe ·
+    <kbd>W</kbd><kbd>S</kbd> climb · <kbd>Shift</kbd> fast · <kbd>L</kbd> land</div>
 </div>
 
 <div id="tele" class="panel">
@@ -172,6 +179,8 @@
   <span><label>GUST</label><b id="tGust">-</b></span>
   <span><label>ROLL · PITCH</label><b id="tAtt">-</b></span>
   <span><label>BATTERY</label><b id="tBat">-</b></span>
+  <span class="goal"><label>SURVIVOR</label><b id="tSurv">-</b></span>
+  <span class="goal"><label>HOME</label><b id="tHome">-</b></span>
 </div>
 
 <div id="log" class="panel">
@@ -209,14 +218,24 @@
     <label class="toggle"><input type="checkbox" id="cTrail" checked>Trails</label>
     <label class="toggle"><input type="checkbox" id="cLinks" checked>Comms</label>
     <label class="toggle"><input type="checkbox" id="cDebug" checked>Agent debug</label>
+    <label class="toggle"><input type="checkbox" id="cAgentMap" checked>Agent map</label>
     <label class="toggle"><input type="checkbox" id="cLabels" checked>Labels</label>
     <label class="toggle"><input type="checkbox" id="cBloom" checked>Glow</label>
+  </div>
+  <div class="line" id="replay">
+    <div class="seg"><button id="rpPlay" title="Replay: play / pause">▶</button></div>
+    <input type="range" id="rpBar" min="0" max="0" value="0" title="Drag to scrub back through the run">
+    <span id="rpTime" class="mono muted small">-</span>
+    <div class="seg" id="rpSpeed">
+      <button data-v="1" class="on">1×</button><button data-v="4">4×</button><button data-v="16">16×</button>
+    </div>
+    <div class="seg"><button id="rpLive" class="live">● Live</button></div>
   </div>
 </div>
 
 <div id="final">
   <div class="card panel">
-    <div class="label">MISSION COMPLETE</div>
+    <div class="label" id="fLabel">MISSION COMPLETE</div>
     <div id="fScore">0</div>
     <div id="fGrid"></div>
     <div class="hint">Click anywhere to close</div>

@@ -25,11 +25,30 @@ const ARTIFACTS = {
   rope: { name: "Rope", color: 0xda77f2 },
 };
 const DRONE_SCALE = 1.6;                    // drawn bigger than the 0.2 m collision sphere so it reads from afar
+// Drone model (glTF, y-up): Sketchfab "Bionic dragonfly four-axis UAV aircraft" by boxgizmo, Sketchfab
+// Standard licence (drone_3d_model/license.txt). Without it the drones keep the drawn shape.
+const DRONE_MODEL = "/drone_3d_model/scene.gltf";
+const DRONE_SPAN = 0.56;         // rotor tip to rotor tip in the model frame, like the drawn shape (x DRONE_SCALE)
+const MODEL_YAW = -Math.PI / 2;  // turns the model's nose onto body +x
+// The model's two propeller meshes each hold one diagonal pair; the mirrored pair spins the other way.
+// GLTFLoader sanitises node names ("Cong5_03 - Default_0" -> "Cong5_03_-_Default_0"), so match prefixes.
+const PROP_MESHES = [[/^Cong5_03/, 1], [/^Symtrie1_03/, -1]];
+const propSpin = (name) => (PROP_MESHES.find(([re]) => re.test(name)) || [null, 0])[1];
+const PROP_SPEED = 45;           // rad/s on screen at hover (real rotors are far faster; this reads as spinning)
+const MIX_TILT = 0.35;           // share of a rotor's thrust the roll/pitch demand may add or take
+const MIX_YAW = 0.25;            // same for the yaw demand
 const MAP_MAX = 400_000, MAP_VOXEL = 0.3;   // accumulated LiDAR map: at most one point per 30 cm voxel
 const FOG = { outside: 0.004, inside: 0.06 };
 const LAMP = 30;                           // headlamp candela; walls 2 m away should stay under the bloom threshold
 const HOLO = [0x8b5cf6, 0x3b82f6, 0x22d3ee].map((c) => new THREE.Color(c));    // cave tint, low -> high
 const MAP_RAMP = [0xd9480f, 0xf59f00, 0xfff3bf].map((c) => new THREE.Color(c)); // mapped surface tint
+// SubT maps ship PBR rock textures in maps/<name>/textures/<set>_{Albedo,Normal,Roughness}.jpg,
+// and their cave.glb names each mesh's material after its texture set.
+const ROCK_TEXTURES = ["CaveWall", "StriatedRock", "RockPile", "Grass", "Gravel"];
+const DAY_SKY = new THREE.Color(0x9fb3c8);
+const PARAMS = new URLSearchParams(location.search);
+// ?light=N scales every light, as in the stock viewer; 5 is the default there and is our tuned look.
+const LIGHT_GAIN = (Number(PARAMS.get("light")) || 5) / 5;
 
 const $ = (id) => document.getElementById(id);
 const on = (id) => $(id).checked;
@@ -57,7 +76,8 @@ labelRenderer.domElement.id = "labels";
 renderer.domElement.after(labelRenderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = backdrop();
+const BACKDROP = backdrop();
+scene.background = BACKDROP;
 scene.fog = new THREE.FogExp2(0x05080d, FOG.outside);
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
 
@@ -77,8 +97,9 @@ const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
-const hemi = new THREE.HemisphereLight(0xbcd2ff, 0x2a1d14, 1.1);
-const sun = new THREE.DirectionalLight(0xfff0dd, 1.6);
+const LIGHT = { hemi: 1.1 * LIGHT_GAIN, sun: 1.6 * LIGHT_GAIN, lamp: LAMP * LIGHT_GAIN };
+const hemi = new THREE.HemisphereLight(0xbcd2ff, 0x2a1d14, LIGHT.hemi);
+const sun = new THREE.DirectionalLight(0xfff0dd, LIGHT.sun);
 sun.position.set(30, -40, 80);
 scene.add(hemi, sun);
 
@@ -189,11 +210,41 @@ rockMat.onBeforeCompile = (s) => {
     normal = normalize(normal - 0.6 * (gv - dot(gv, normal) * normal));`);
 };
 
+// Rock on SubT maps: the world's own textures. Front faces only, as Gazebo draws them: the tiles are
+// hollow tubes whose faces point inward, so from outside their shells stay invisible instead of black.
+const texLoader = new THREE.TextureLoader();
+const texMats = {};
+function texturedRock(map, set) {
+  const tex = (kind, srgb) => {
+    const t = texLoader.load(`/maps/${map}/textures/${set}_${kind}.jpg`);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;           // tile UVs run well past 1
+    t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  return texMats[set] ??= new THREE.MeshStandardMaterial({
+    map: tex("Albedo", true), normalMap: tex("Normal"), roughnessMap: tex("Roughness"),
+    metalness: 0, envMapIntensity: 0, side: THREE.FrontSide, transparent: true,
+  });
+}
+
+// Artifact and base-station models (viewer/assets/<type>.glb, from cavesim.subt_import;
+// Open Robotics on Gazebo Fuel, CC0 / CC BY 4.0). A missing file keeps the drawn shape.
+const assetCache = {};
+function loadAsset(name, onLoad) {
+  assetCache[name] ??= new Promise((res) =>
+    new GLTFLoader().load(`/viewer/assets/${name}.glb`, (g) => res(g.scene), undefined, () => res(null)));
+  assetCache[name].then((m) => m && onLoad(m.clone()));
+}
+
 // ---------------------------------------------------------------- state
 let initMsg = null, lastState = null, ws = null;
 let cave = null, grid = null, linkLine = null;
 let selected = 0, camMode = "orbit", caveStyle = "holo", saved = null, intro = null;
 let lastPulse = 0;
+let rescue = null;          // mission settings of a rescue course, else null
+const rescued = new Set();  // drones that reached the survivor
+let lapped = false;
 const drones = [];          // per drone: meshes, lines, smoothed pose, HUD card refs
 const artifactObjs = {};
 const found = new Set();
@@ -369,17 +420,18 @@ function makeDrone(i) {
     const blade = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.018, 0.004), armMat);
     blade.position.set(0.2 * x, 0.2 * y, 0.047);
     model.add(motor, disc, rim, blade);
-    rotors.push({ disc, blade, dir: x * y });
+    rotors.push({ obj: blade, axis: "z", disc, dir: x * y, x: x / Math.SQRT2, y: y / Math.SQRT2, w: 1 });
   }
   const nose = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 6), new THREE.MeshBasicMaterial({ color: 0xfff4e0 }));
   nose.position.set(0.155, 0, 0);
   model.add(nose);
 
-  const lamp = new THREE.SpotLight(0xfff1dc, LAMP, 30, 0.6, 0.55, 2);
-  lamp.position.set(0.3, 0, 0);
+  // Lamp ahead of the nose (the model reaches ~0.45 m forward), so the drone does not light itself.
+  const lamp = new THREE.SpotLight(0xfff1dc, LIGHT.lamp, 30, 0.6, 0.55, 2);
+  lamp.position.set(0.55, 0, 0);
   lamp.target.position.set(6, 0, -0.8);
   const beam = new THREE.Mesh(beamGeo, beamMat);
-  beam.position.set(0.3, 0, 0);
+  beam.position.set(0.55, 0, 0);
   beam.rotation.y = 0.13;
   tilt.add(lamp, lamp.target, beam);
 
@@ -400,17 +452,107 @@ function makeDrone(i) {
   const goal = new THREE.Mesh(new THREE.OctahedronGeometry(0.25), new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true }));
   scene.add(root, ghost, errLine, goal);
 
-  return {
+  const g = {
     i, color, root, tilt, model, led, rotors, lamp, beam, halo, label, ghost, errLine, goal,
     scan: makePoints(color, 0.16, GLOW, true),
     pts: makePoints(0xffffff, 0.4, DOT, false),
+    amap: makePoints(0x3bc9db, 0.3, DOT, false),       // the agent's own map (debug "map"), as it sends it
     trail: makeLine2(0xffffff, { width: 2.5, vertexColors: true, opacity: 0.95 }),
     odomTrail: makeLine2(color, { width: 1.2, dashed: true, opacity: 0.55 }),
     path: makeLine2(0xffffff, { width: 1.5, opacity: 0.6 }),
     target: new THREE.Vector3(), odom: new THREE.Vector3(), hasOdom: true, rp: [0, 0],
     yaw: 0, targetYaw: 0, lastT: null, status: "flying", alive: true, battery: 1, lowWarned: false,
-    hasTrail: false,
+    hasTrail: false, mix: null,
   };
+  droneModel.then((proto) => proto && attachModel(g, proto));
+  return g;
+}
+
+// Split a mesh holding two rotors into two pivots, each spinning about its own hub (mesh-local y).
+function splitRotors(mesh, dir) {
+  const geo = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry;
+  const pos = geo.attributes.position;
+  const nTri = pos.count / 3;
+  const centre = new THREE.Vector3(), tri = [];
+  for (let t = 0; t < nTri; t++) {
+    const c = new THREE.Vector3();
+    for (let k = 0; k < 3; k++) c.add(new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k));
+    tri.push(c.divideScalar(3));
+    centre.add(c);
+  }
+  centre.divideScalar(nTri);
+  // The two rotors sit on a diagonal: split along the direction from the centre to the farthest triangle.
+  const axis = tri.reduce((a, c) => (c.distanceTo(centre) > a.distanceTo(centre) ? c : a)).clone().sub(centre);
+  const groups = [[], []];
+  tri.forEach((c, t) => groups[c.clone().sub(centre).dot(axis) > 0 ? 0 : 1].push(t));
+  for (const ids of groups) {
+    const g = new THREE.BufferGeometry();
+    for (const name of Object.keys(geo.attributes)) {
+      const src = geo.attributes[name], n = src.itemSize;
+      const out = new Float32Array(ids.length * 3 * n);
+      ids.forEach((t, i) => { for (let k = 0; k < 3 * n; k++) out[i * 3 * n + k] = src.array[3 * t * n + k]; });
+      g.setAttribute(name, new THREE.BufferAttribute(out, n));
+    }
+    // Hub = area-weighted centroid: a three-blade rotor is symmetric about its shaft, so this lands
+    // exactly on the motor axis (its bounding-box centre is off by ~4 % of the span).
+    const hub = new THREE.Vector3(), a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    let area = 0;
+    const P = g.attributes.position;
+    for (let t = 0; t < P.count; t += 3) {
+      a.fromBufferAttribute(P, t); b.fromBufferAttribute(P, t + 1); c.fromBufferAttribute(P, t + 2);
+      const w = b.clone().sub(a).cross(c.clone().sub(a)).length();
+      hub.addScaledVector(a.clone().add(b).add(c), w / 3);
+      area += w;
+    }
+    hub.divideScalar(area);
+    g.translate(-hub.x, -hub.y, -hub.z);
+    const pivot = new THREE.Object3D();
+    pivot.position.copy(hub);
+    pivot.userData.spin = dir;
+    pivot.add(new THREE.Mesh(g, mesh.material));
+    mesh.add(pivot);
+  }
+  mesh.geometry = new THREE.BufferGeometry();     // the pivots carry the rotors now
+}
+
+// Loaded once; each drone gets a clone. Resolves to null when the file is missing.
+const droneModel = new Promise((res) => new GLTFLoader().load(DRONE_MODEL, (gltf) => {
+  const m = gltf.scene;
+  const props = [];
+  m.traverse((o) => { if (o.isMesh && propSpin(o.name)) props.push(o); });
+  props.forEach((o) => splitRotors(o, propSpin(o.name)));
+  if (props.length !== 2) console.warn(`drone model: found ${props.length} of 2 propeller meshes; rotors will not spin`);
+  m.rotation.x = Math.PI / 2;                 // glTF y-up -> z-up
+  const turn = new THREE.Group();
+  turn.add(m);
+  turn.rotation.z = MODEL_YAW;
+  const holder = new THREE.Group();
+  holder.add(turn);
+  holder.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(holder);
+  const s = DRONE_SPAN / Math.max(box.max.x - box.min.x, box.max.y - box.min.y);
+  holder.scale.setScalar(s);
+  holder.position.copy(box.getCenter(new THREE.Vector3()).multiplyScalar(-s));
+  holder.updateMatrixWorld(true);
+  // Where each rotor sits (body x forward, y left), as a fraction of the span: the mixer's lever arms.
+  const hubs = [];
+  holder.traverse((o) => { if (o.userData.spin) hubs.push([o, o.getWorldPosition(new THREE.Vector3())]); });
+  const span = Math.max(...hubs.map(([, p]) => Math.hypot(p.x, p.y)), 1e-6);
+  hubs.forEach(([o, p]) => { o.userData.x = p.x / span; o.userData.y = p.y / span; });
+  res(holder);
+}, undefined, () => { console.warn(`drone model not found at ${DRONE_MODEL}; keeping the drawn drone`); res(null); }));
+
+function attachModel(g, proto) {
+  g.model.clear();
+  g.model.add(proto.clone());
+  const led = new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), g.led);   // status LED in the drone's colour
+  led.position.set(-0.12, 0, 0.06);
+  g.model.add(led);
+  g.rotors = [];
+  g.model.traverse((o) => {
+    const u = o.userData;
+    if (u.spin) g.rotors.push({ obj: o, axis: "y", dir: u.spin, x: u.x, y: u.y, w: 1 });
+  });
 }
 
 const selRing = new THREE.Mesh(new THREE.RingGeometry(0.8, 0.9, 48),
@@ -450,6 +592,13 @@ function buildBase(msg) {
   const label = tag("BASE", "base");
   label.position.z = 2.2;
   baseGround.add(pad, padRing, home, beacon, label);
+  if (msg.base_station) {     // tent + antenna where the SubT world puts them
+    loadAsset("base_station", (m) => {
+      m.position.copy(v3(msg.base_station));
+      m.rotation.z = msg.base_station[3];        // assets are exported z-up already
+      scene.add(m);
+    });
+  }
 
   const ring = [];
   for (let k = 0; k <= 160; k++) {
@@ -473,7 +622,7 @@ const ART_GEO = {
   rope: new THREE.TorusGeometry(0.28, 0.07, 10, 28),
 };
 
-function buildArtifact(a) {
+function buildArtifact(a, k) {
   const info = ARTIFACTS[a.type] || { name: a.type, color: 0xadb5bd };
   const mat = new THREE.MeshStandardMaterial({ color: info.color, emissive: info.color, emissiveIntensity: 0.25,
                                                transparent: true, opacity: 0.5, roughness: 0.5 });
@@ -488,17 +637,35 @@ function buildArtifact(a) {
   group.add(mesh, glow, label);
   group.position.copy(v3(a.pos));
   scene.add(group);
-  artifactObjs[a.id] = { a, info, group, mesh, glow, label, phase: a.id * 1.7 };
+  const o = artifactObjs[a.id] = { a, info, group, mesh, glow, label, phase: a.id * 1.7, lift: 0.35, beacon: null };
+  // The real model on the floor (its position is where it touches down; some models, the survivor,
+  // have their origin well below their feet), our marker floating above it.
+  loadAsset(a.type, (m) => {
+    m.rotation.z = a.yaw || 0;
+    const box = new THREE.Box3().setFromObject(m);
+    m.position.z -= box.min.z;
+    group.add(m);
+    o.lift = box.max.z - box.min.z + 0.5;
+    mesh.scale.setScalar(0.6);
+    glow.position.z = o.lift;
+    label.position.z = o.lift + 0.6;
+  });
+  if (rescue && k === rescue.target) {    // the survivor: a beam visible from across the map
+    o.beacon = new THREE.Mesh(beaconGeometry(40), new THREE.MeshBasicMaterial({
+      color: info.color, vertexColors: true, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending }));
+    group.add(o.beacon);
+  }
 }
 
-function markFound(id, celebrate) {
+function markFound(id, celebrate, isFound = true) {
   const o = artifactObjs[id];
   if (!o) return;
-  o.mesh.material.opacity = 1;
-  o.mesh.material.emissiveIntensity = 1.6;
-  o.glow.visible = true;
-  o.label.element.textContent = `✓ ${o.info.name}`;
-  o.label.element.classList.add("found");
+  o.mesh.material.opacity = isFound ? 1 : 0.5;
+  o.mesh.material.emissiveIntensity = isFound ? 1.6 : 0.25;
+  o.glow.visible = isFound;
+  o.label.element.textContent = isFound ? `✓ ${o.info.name}` : o.info.name;
+  o.label.element.classList.toggle("found", isFound);
   if (celebrate) {
     burst(o.group.position, o.info.color, { to: 7, life: 1.6 });
     burst(o.group.position, 0x4ade80, { to: 4, life: 1.1 });
@@ -553,6 +720,10 @@ function onInit(msg) {
   initMsg = msg;
   $("mapname").textContent = msg.map;
   $("tmax").textContent = msg.mission_time_s;
+  rescue = msg.mission?.type === "rescue" ? msg.mission : null;
+  document.body.classList.toggle("rescue", !!rescue);
+  $("lScore").textContent = rescue ? "Lap time" : "Score";
+  $("lArts").textContent = rescue ? "Rescued" : "Artifacts";
   buildBase(msg);
   msg.artifacts.forEach(buildArtifact);
   for (let i = 0; i < msg.n_drones; i++) drones.push(makeDrone(i));
@@ -565,7 +736,11 @@ function onInit(msg) {
 
   new GLTFLoader().load(`/maps/${msg.map}/cave.glb`, (gltf) => {
     cave = gltf.scene;
-    cave.traverse((o) => { if (o.isMesh && !o.geometry.attributes.normal) o.geometry.computeVertexNormals(); });
+    cave.traverse((o) => {
+      if (!o.isMesh) return;
+      if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
+      if (ROCK_TEXTURES.includes(o.material?.name)) o.userData.rock = texturedRock(msg.map, o.material.name);
+    });
     scene.add(cave);
     cave.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(cave);
@@ -596,12 +771,25 @@ function onInit(msg) {
 
 function onState(msg) {
   if (!initMsg) return;
+  remember(msg);
+  if (replayAt === null) applyState(msg);
+  updateReplayBar();
+}
+
+// instant: jump instead of easing (a replay seek). quiet: no log lines or bursts.
+function applyState(msg, { instant = false, quiet = !seeded } = {}) {
   lastState = msg;
   const s = msg.score;
   $("time").textContent = msg.t.toFixed(1);
   $("tbar").style.width = `${Math.min(100, (100 * msg.t) / initMsg.mission_time_s)}%`;
-  $("score").textContent = s.score.toFixed(1);
-  $("arts").textContent = `${s.artifacts_found}/${s.artifacts_total}`;
+  if (rescue) {
+    const first = Object.values(s.rescued_at_s || {})[0];
+    $("score").textContent = s.lap_time_s != null ? `${s.lap_time_s.toFixed(1)}s` : "—";
+    $("arts").textContent = first != null ? `${first.toFixed(0)}s` : "—";
+  } else {
+    $("score").textContent = s.score.toFixed(1);
+    $("arts").textContent = `${s.artifacts_found}/${s.artifacts_total}`;
+  }
   $("cov").textContent = `${Math.round(100 * s.coverage)}%`;
   $("ret").textContent = `${s.returned.length}/${initMsg.n_drones}`;
 
@@ -610,7 +798,7 @@ function onState(msg) {
     const p = v3(d.pos);
     g.hasOdom = !!d.odom;                // null with --odom off
     if (g.hasOdom) g.odom.copy(v3(d.odom));
-    if (g.lastT === null) {
+    if (g.lastT === null || instant) {
       g.root.position.copy(p);
       g.yaw = d.yaw;
       g.ghost.position.copy(g.odom);
@@ -620,26 +808,28 @@ function onState(msg) {
     g.targetYaw = d.yaw;
     g.rp = d.rp || [0, 0];
     g.battery = d.battery;
+    g.mix = d.mix || null;
 
     if (d.status !== g.status) {
-      if (seeded) {
+      if (!quiet) {
         const home = Math.hypot(d.pos[0] - initMsg.base[0], d.pos[1] - initMsg.base[1]) <= initMsg.home_radius;
         if (d.status === "crashed") logEvent(`Drone ${i} crashed`, "bad");
         else if (d.status === "dead") logEvent(`Drone ${i} battery dead`, "bad");
+        else if (d.status === "out") logEvent(`Drone ${i} left the course`, "bad");
         else if (d.status === "landing") logEvent(`Drone ${i} landing`);
         else if (d.status === "landed") logEvent(home ? `Drone ${i} returned home` : `Drone ${i} landed away from base`, home ? "good" : "warn");
       }
       g.status = d.status;
       g.alive = d.status === "flying" || d.status === "landing";
       g.led.emissiveIntensity = g.alive ? 3 : d.status === "landed" ? 1 : 0.1;
-      g.lamp.intensity = g.alive ? LAMP : 0;
-      g.rotors.forEach((r) => { r.disc.visible = g.alive; });
+      g.lamp.intensity = g.alive ? LIGHT.lamp : 0;
+      g.rotors.forEach((r) => { if (r.disc) r.disc.visible = g.alive; });
       if (d.status === "crashed") g.tilt.rotation.set(1.1, 0.5, 0);
-      g.label.element.classList.toggle("dead", d.status === "crashed" || d.status === "dead");
+      g.label.element.classList.toggle("dead", ["crashed", "dead", "out"].includes(d.status));
     }
     if (g.alive && d.battery < 0.2 && !g.lowWarned) {
       g.lowWarned = true;
-      if (seeded) logEvent(`Drone ${i} battery below 20%`, "warn");
+      if (!quiet) logEvent(`Drone ${i} battery below 20%`, "warn");
     }
 
     if (d.lidar) addToMap(d.lidar);
@@ -656,6 +846,11 @@ function onState(msg) {
     const hasPts = !!(dbg.points && dbg.points.length);
     if (hasPts) setPoints(g.pts, dbg.points.flat());
     g.pts.visible = dv && hasPts;
+    if (dbg.map) {                       // agents may send their map only now and then: keep the last one
+      setPoints(g.amap, dbg.map.flat());
+      g.hasAmap = dbg.map.length > 0;
+    }
+    g.amap.visible = on("cAgentMap") && !!g.hasAmap;
 
     const u = ui[i];
     u.st.textContent = d.status;
@@ -670,10 +865,22 @@ function onState(msg) {
     u.pct.textContent = `${Math.round(100 * d.battery)}%`;
   });
 
-  for (const id of msg.found) {
-    if (found.has(id)) continue;
-    found.add(id);
-    markFound(id, seeded);
+  const nowFound = new Set(msg.found);
+  for (const id of nowFound) if (!found.has(id)) { found.add(id); markFound(id, !quiet); }
+  for (const id of found) if (!nowFound.has(id)) { found.delete(id); markFound(id, false, false); }   // replayed back
+  if (rescue) {
+    const at = s.rescued_at_s || {};
+    for (const i of Object.keys(at)) {
+      if (rescued.has(i)) continue;
+      rescued.add(i);
+      if (quiet) continue;
+      logEvent(`Drone ${i} reached the survivor`, "good");
+      const o = artifactObjs[initMsg.artifacts[rescue.target].id];
+      if (o) burst(o.group.position, 0x4ade80, { to: 8, life: 1.6 });
+    }
+    for (const i of rescued) if (!(i in at)) rescued.delete(i);
+    if (s.lap_time_s != null && !lapped && !quiet) logEvent(`Lap complete · ${s.lap_time_s.toFixed(1)} s`, "good");
+    lapped = s.lap_time_s != null;
   }
   seeded = true;
   updateTele();
@@ -689,6 +896,16 @@ function updateTele() {
   const rp = d.rp || [0, 0];
   $("tAtt").textContent = `${(rp[0] * 57.3).toFixed(0)}° · ${(rp[1] * 57.3).toFixed(0)}°`;
   $("tBat").textContent = `${Math.round(100 * d.battery)}%`;
+  if (rescue) {
+    // Bearing off the nose, distance and height to the survivor and to home: what a keyboard pilot needs.
+    const arrow = (t) => {
+      const dx = t[0] - d.pos[0], dy = t[1] - d.pos[1], dz = t[2] - d.pos[2];
+      return `<i style="transform:rotate(${-wrap(Math.atan2(dy, dx) - d.yaw)}rad)">⬆</i> ` +
+        `${Math.hypot(dx, dy, dz).toFixed(0)} m · ${dz >= 0 ? "+" : ""}${dz.toFixed(0)}`;
+    };
+    $("tSurv").innerHTML = arrow(initMsg.artifacts[rescue.target].pos);
+    $("tHome").innerHTML = arrow(initMsg.base);
+  }
 }
 
 function onTrails(msg) {
@@ -710,6 +927,29 @@ function onTrails(msg) {
 function onDone(msg) {
   const s = msg.score;
   const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  if (rescue) {
+    const at = Object.values(s.rescued_at_s || {})[0];
+    const failed = [[s.crashed, "crashed"], [s.battery_dead, "battery dead"], [s.out_of_course, "left the course"]]
+      .filter(([ids]) => ids.length).map(([, why]) => why);
+    const cause = Object.values(s.crash_cause || {})[0];
+    const rows = [
+      ["Survivor reached", at != null ? `${at.toFixed(1)} s` : "no", ""],
+      ["Landed home", s.returned.length ? "yes" : "no", ""],
+      ["Failure", failed.length ? failed.join(", ") + (cause ? ` (${cause})` : "") : s.success ? "-" : "time up", ""],
+      null,
+      ["Collisions", `${s.collisions.reduce((x, y) => x + y, 0)}`, ""],
+      ["Worst hit", `${Math.max(0, ...s.worst_hit_ms).toFixed(2)} m/s`, ""],
+      ["Total distance", `${s.distance_m.reduce((x, y) => x + y, 0).toFixed(0)} m`, ""],
+      ["Final odometry drift", `${avg(s.final_drift_m).toFixed(2)} m`, ""],
+      ["Mission time", `${s.time_s} s`, ""],
+    ];
+    $("fLabel").textContent = s.success ? "RESCUE · LAP TIME" : "RESCUE FAILED";
+    $("fScore").textContent = s.success ? `${s.lap_time_s.toFixed(1)}s` : "—";
+    $("fGrid").innerHTML = rows.map((r) => (r ? `<span>${r[0]}</span><span class="v">${r[1]}</span><span class="pts">${r[2]}</span>` : "<hr>")).join("");
+    $("final").style.display = "block";
+    logEvent(s.success ? `Mission over · lap ${s.lap_time_s.toFixed(1)} s` : "Mission over · rescue failed", s.success ? "good" : "bad");
+    return;
+  }
   const rows = [
     ["Artifacts found", `${s.artifacts_found} / ${s.artifacts_total}`, `+${10 * s.artifacts_found}`],
     ["Drones home", `${s.returned.length}`, `+${5 * s.returned.length}`],
@@ -731,12 +971,13 @@ function onDone(msg) {
 function applyCave() {
   const o = $("opacity").value / 100;
   caveU.uOpacity.value = o;
-  rockMat.opacity = o;
-  rockMat.depthWrite = o >= 0.95;
+  for (const m of [rockMat, ...Object.values(texMats)]) {
+    m.opacity = o;
+    m.depthWrite = o >= 0.95;
+  }
   if (!cave) return;
   cave.visible = caveStyle !== "off";
-  const mat = caveStyle === "rock" ? rockMat : holoMat;
-  cave.traverse((m) => { if (m.isMesh) m.material = mat; });
+  cave.traverse((m) => { if (m.isMesh) m.material = caveStyle === "rock" ? m.userData.rock || rockMat : holoMat; });
 }
 
 function setCaveStyle(style, opacity) {
@@ -766,11 +1007,42 @@ function setCamMode(mode) {
   document.body.classList.toggle("inside", inside(mode));
   segSelect("cam", mode);
   controls.enabled = !inside(mode);
-  scene.fog.density = inside(mode) ? FOG.inside : FOG.outside;
-  hemi.intensity = inside(mode) ? 0.05 : 1.1;
-  sun.intensity = inside(mode) ? 0 : 1.6;
   bloom.threshold = inside(mode) ? 0.9 : 0.72;
   if (grid) grid.visible = !inside(mode);
+  if (inside(mode)) return;       // updateDaylight() lights the camera views
+  scene.fog.density = FOG.outside;
+  scene.fog.color.setHex(0x05080d);
+  scene.background = BACKDROP;
+  hemi.intensity = LIGHT.hemi;
+  sun.intensity = LIGHT.sun;
+}
+
+// SubT worlds start outside the cave mouth: under open sky the camera views use daylight, under rock
+// darkness and the drones' lamps. Daylight follows the share of the sky the camera can see (straight
+// up, 8 rays at 45 deg, 4 at 20 deg), re-measured five times a second, so a cave mouth stays half lit.
+const SKY_DIRS = [new THREE.Vector3(0, 0, 1)];
+for (let k = 0; k < 8; k++) SKY_DIRS.push(new THREE.Vector3(Math.cos(k * Math.PI / 4), Math.sin(k * Math.PI / 4), 1).normalize());
+for (let k = 0; k < 4; k++) SKY_DIRS.push(new THREE.Vector3(Math.cos((k + 0.5) * Math.PI / 2), Math.sin((k + 0.5) * Math.PI / 2), Math.tan(Math.PI / 9)).normalize());
+let daylight = 0, skyOpen = 0, skyCheckIn = 0;
+const skyColor = new THREE.Color(), BLACK = new THREE.Color(0, 0, 0);
+
+function updateDaylight(dt) {
+  if (!(camMode === "chase" || camMode === "fpv") || !cave) return;
+  skyCheckIn -= dt;
+  if (skyCheckIn <= 0) {
+    skyCheckIn = 0.2;
+    ray.far = 60;
+    const free = SKY_DIRS.filter((d) => { ray.set(camera.position, d); return !ray.intersectObject(cave, true).length; });
+    skyOpen = Math.min(1.5 * free.length / SKY_DIRS.length, 1);
+  }
+  daylight += (skyOpen - daylight) * damp(dt, 3);
+  const lerp = THREE.MathUtils.lerp;
+  hemi.intensity = lerp(0.05 * LIGHT_GAIN, LIGHT.hemi, daylight);
+  sun.intensity = lerp(0, LIGHT.sun, daylight);
+  scene.fog.density = lerp(FOG.inside, FOG.outside, daylight);
+  skyColor.lerpColors(BLACK, DAY_SKY, daylight);
+  scene.fog.color.copy(skyColor);
+  scene.background = daylight > 0.02 ? skyColor : BACKDROP;
 }
 
 function applyToggles() {
@@ -796,8 +1068,15 @@ function updateDrones(dt, t) {
     if (g.alive) {
       g.tilt.rotation.x += (g.rp[0] - g.tilt.rotation.x) * k;
       g.tilt.rotation.y += (g.rp[1] - g.tilt.rotation.y) * k;
-      g.rotors.forEach((r) => { r.blade.rotation.z += r.dir * dt * 38; });
       if (g.battery < 0.2) g.led.emissiveIntensity = Math.sin(t * 9) > 0 ? 3 : 0.3;
+    }
+    // Quadrotor mixer: each rotor gets a share of the thrust, more or less by where it sits (roll:
+    // left/right, pitch: front/back) and by its spin direction (yaw). Speed ~ sqrt(thrust), eased.
+    const [T, roll, pitch, yaw] = g.mix || (g.alive ? [1, 0, 0, 0] : [0, 0, 0, 0]);
+    for (const r of g.rotors) {
+      const share = Math.max(T * (1 + MIX_TILT * (roll * r.y - pitch * r.x) - MIX_YAW * yaw * r.dir), 0);
+      r.w += (Math.sqrt(share) - r.w) * damp(dt, 8);
+      r.obj.rotation[r.axis] += r.dir * PROP_SPEED * r.w * dt;
     }
     const odomOn = on("cOdom") && g.hasOdom;
     g.ghost.position.lerp(g.odom, k);
@@ -847,7 +1126,8 @@ function updateScene(dt, t) {
     o.group.visible = isFound || on("cTruth");
     o.label.visible = o.group.visible && (!inside || camera.position.distanceTo(o.group.position) < 15);
     o.mesh.rotation.z = t * 0.6 + o.phase;
-    o.mesh.position.z = 0.35 + Math.sin(t * 1.6 + o.phase) * 0.08;
+    o.mesh.position.z = o.lift + Math.sin(t * 1.6 + o.phase) * 0.08;
+    if (o.beacon) o.beacon.visible = !inside;
     if (isFound) o.glow.material.opacity = 0.55 + 0.25 * Math.sin(t * 3 + o.phase);
   }
   if (initMsg && t - lastPulse > 2.4) {
@@ -892,16 +1172,23 @@ function updateCamera(dt) {
   }
   const fwd = _w.set(Math.cos(g.yaw), Math.sin(g.yaw), 0);
   if (camMode === "chase") {
-    const want = p.clone().addScaledVector(fwd, -3.4);
-    want.z += 1.4;
-    if (cave) {                       // pull in when a wall is between the drone and the camera
-      const dir = want.clone().sub(p);
-      const len = dir.length();
-      ray.set(p, dir.divideScalar(len));
-      ray.far = len;
-      const hit = ray.intersectObject(cave, true)[0];
-      if (hit) want.copy(p).addScaledVector(dir, Math.max(hit.distance - 0.4, 0.6));
+    // Behind and above; up against a ceiling that view is rock, so try level, then from below, and
+    // take the first with most of the distance free, else the one with the most room, short of the rock.
+    const len = Math.hypot(3.4, 1.4);
+    let want = null, best = null;
+    for (const pitch of [Math.atan2(1.4, 3.4), 0, -0.3]) {
+      const dir = _v.copy(fwd).multiplyScalar(-Math.cos(pitch)).setZ(Math.sin(pitch)).clone();
+      let free = len;
+      if (cave) {
+        ray.set(p, dir);
+        ray.far = len;
+        const hit = ray.intersectObject(cave, true)[0];
+        if (hit) free = hit.distance;
+      }
+      if (!best || free > best.free) best = { dir, free };
+      if (free >= 0.8 * len) { want = p.clone().addScaledVector(dir, free < len ? free - 0.25 : free); break; }
     }
+    want ??= p.clone().addScaledVector(best.dir, Math.max(best.free - 0.25, 0.1));
     camera.position.lerp(want, damp(dt, 5));
     lookAt.lerp(_v.copy(p).addScaledVector(fwd, 2.5), damp(dt, 8));
   } else {
@@ -912,6 +1199,94 @@ function updateCamera(dt) {
   }
   camera.lookAt(lookAt);
 }
+
+// ---------------------------------------------------------------- replay
+// Every state is kept (LiDAR thinned) so the run can be scrubbed back and replayed.
+const history = [];
+let replayAt = null;        // index into history while replaying, null when live
+let replayPlaying = false, replaySpeed = 1;
+let scrubbing = false;      // the replay bar's thumb is held
+const REPLAY_LIDAR_PTS = 600;
+
+function remember(msg) {
+  history.push({ ...msg, drones: msg.drones.map((d) => {
+    if (!d.lidar) return d;
+    const step = Math.max(1, Math.ceil(d.lidar.length / 3 / REPLAY_LIDAR_PTS));
+    const pts = [];
+    for (let k = 0; k < d.lidar.length; k += 3 * step) pts.push(d.lidar[k], d.lidar[k + 1], d.lidar[k + 2]);
+    return { ...d, lidar: pts };
+  }) });
+}
+
+function onHistory(msg) {
+  // The server's record of the run so far (a reload or a late join): LiDAR and debug come every
+  // few ticks, so carry each forward to the ticks between. The LiDAR also rebuilds the map.
+  history.length = 0;
+  const last = [];
+  for (const st of msg.states) {
+    st.drones.forEach((d, i) => {
+      if (d.lidar) { last[i] = { lidar: d.lidar, debug: d.debug }; addToMap(d.lidar); }
+      else if (last[i]) { d.lidar = last[i].lidar; d.debug = last[i].debug; }
+    });
+    remember(st);
+  }
+  updateReplayBar();
+}
+
+function trailsUpTo(k) {
+  // Rebuild trails from the stored states (every 5th, like the server's trails).
+  const tru = drones.map(() => []), odo = drones.map(() => []);
+  for (let j = 0; j <= k; j += 5) history[j].drones.forEach((d, i) => { tru[i].push(d.pos); if (d.odom) odo[i].push(d.odom); });
+  onTrails({ true: tru, odom: odo });
+}
+
+function showReplay(k, instant = true) {
+  if (!history.length) return;
+  replayAt = THREE.MathUtils.clamp(k, 0, history.length - 1);
+  applyState(history[replayAt], { instant, quiet: true });
+  trailsUpTo(replayAt);
+  updateReplayBar();
+}
+
+function goLive() {
+  replayAt = null;
+  replayPlaying = false;
+  if (history.length) applyState(history[history.length - 1], { instant: true, quiet: true });
+  updateReplayBar();
+}
+
+function updateReplayBar() {
+  const bar = $("rpBar");
+  bar.max = Math.max(history.length - 1, 0);
+  const k = replayAt ?? history.length - 1;
+  if (!scrubbing) bar.value = k;
+  const t = history[k] ? history[k].t : 0, end = history.length ? history[history.length - 1].t : 0;
+  $("rpTime").textContent = replayAt === null ? `${end.toFixed(1)} s` : `${t.toFixed(1)} / ${end.toFixed(1)} s`;
+  $("rpLive").classList.toggle("live", replayAt === null);
+  $("rpPlay").textContent = replayPlaying ? "❚❚" : "▶";
+}
+
+// Live, every state (10 a second) would put the thumb back at the end and the drag never took:
+// holding the thumb leaves live at once, and nothing moves it while it is held.
+$("rpBar").addEventListener("pointerdown", () => {
+  scrubbing = true;
+  replayPlaying = false;
+  if (replayAt === null) replayAt = Math.max(history.length - 1, 0);
+});
+addEventListener("pointerup", () => { scrubbing = false; });
+$("rpBar").oninput = (e) => { replayPlaying = false; showReplay(Number(e.target.value)); };
+$("rpLive").onclick = goLive;
+$("rpPlay").onclick = () => {
+  if (replayAt === null) showReplay(history.length - 1);
+  replayPlaying = !replayPlaying;
+  updateReplayBar();
+};
+setInterval(() => {
+  // Replay at the recorded pace (one state per 0.1 s of sim time); catching up means live again.
+  if (replayAt === null || !replayPlaying) return;
+  if (replayAt >= history.length - 1) { goLive(); return; }
+  showReplay(replayAt + replaySpeed, false);
+}, 100);
 
 // ---------------------------------------------------------------- socket and controls
 function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
@@ -925,7 +1300,8 @@ function connect() {
     const msg = JSON.parse(ev.data);
     if (msg.type === "init") onInit(msg);
     else if (msg.type === "state") onState(msg);
-    else if (msg.type === "trails") onTrails(msg);
+    else if (msg.type === "history") onHistory(msg);
+    else if (msg.type === "trails") { if (replayAt === null) onTrails(msg); }
     else if (msg.type === "done") onDone(msg);
   };
 }
@@ -944,6 +1320,7 @@ $("pause").onclick = () => {
   $("pause").classList.toggle("paused", paused);
 };
 seg("speed", (v) => { send({ cmd: "speed", value: Number(v) }); segSelect("speed", v); });
+seg("rpSpeed", (v) => { replaySpeed = Number(v); segSelect("rpSpeed", v); });
 seg("cam", setCamMode);
 seg("caveStyle", (v) => setCaveStyle(v));
 $("opacity").oninput = applyCave;
@@ -958,13 +1335,34 @@ $("final").onclick = () => { $("final").style.display = "none"; };
 controls.addEventListener("start", () => { intro = null; });
 
 const CAMS = ["orbit", "follow", "chase", "fpv"];
+let beforeFpv = "orbit";
 addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT" && e.target.type !== "checkbox") return;
+  if (e.target.tagName === "INPUT" && e.target.type !== "checkbox" && e.target.type !== "range") return;
   if (/^Digit[1-9]$/.test(e.code)) select(Number(e.code.slice(5)) - 1);
   else if (e.code === "KeyC") setCamMode(CAMS[(CAMS.indexOf(camMode) + 1) % CAMS.length]);
+  else if (e.code === "KeyV") {          // FPV and back, as in the stock viewer
+    if (camMode !== "fpv") beforeFpv = camMode;
+    setCamMode(camMode === "fpv" ? beforeFpv : "fpv");
+  }
   else if (e.code === "KeyH") document.body.classList.toggle("ui-hidden");
   else if (e.code === "Space") { e.preventDefault(); $("pause").click(); }
 });
+
+// Keys held down go to the server, for the keyboard pilot (agents.manual); other agents ignore them.
+const PILOT_KEYS = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright", "w", "s", "a", "d", "l", "shift"]);
+const held = new Set();
+function pilotKey(e, down) {
+  if (e.target.tagName === "INPUT" && e.target.type !== "checkbox" && e.target.type !== "range") return;
+  const k = e.key.toLowerCase();
+  if (!PILOT_KEYS.has(k)) return;
+  if (k.startsWith("arrow")) e.preventDefault();       // no page scrolling, no slider nudging
+  const had = held.has(k);
+  if (down) held.add(k); else held.delete(k);
+  if (had !== down) send({ cmd: "keys", keys: [...held] });
+}
+addEventListener("keydown", (e) => pilotKey(e, true));
+addEventListener("keyup", (e) => pilotKey(e, false));
+addEventListener("blur", () => { held.clear(); send({ cmd: "keys", keys: [] }); });
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
@@ -975,6 +1373,7 @@ renderer.setAnimationLoop(() => {
   updateScene(dt, t);
   flushMap();
   updateCamera(dt);
+  updateDaylight(dt);
   composer.render(dt);
   labelRenderer.render(scene, camera);
 });

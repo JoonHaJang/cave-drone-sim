@@ -19,9 +19,23 @@ from pathlib import Path
 
 from websockets.asyncio.server import serve
 
+from .api import PILOT
+from .config import SimConfig
 from .sim import Simulator
 
 ROOT = Path(__file__).resolve().parent.parent
+HISTORY_FULL = 10         # replay history: LiDAR and debug kept every this many ticks
+HISTORY_LIDAR_PTS = 600   # ... thinned to this many points (as the viewer's own replay)
+
+
+def save_record(sim, args):
+    """--record: the flown trails and the score, as JSON."""
+    if args.record:
+        out = Path(args.record)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"map": args.map, "agent": args.agent, "seed": args.seed, "t": sim.t,
+                                   "score": sim.score(), **sim.trails()}))
+        print("recorded", out)
 
 
 def load_agent(spec):
@@ -53,6 +67,24 @@ class Session:
         self.clients = set()        # 3D viewer windows
         self.sensor_clients = {}    # sensor windows: websocket -> drone id
         self.done = False
+        self.history = []           # every state so far, for a viewer that joins late or reloads
+
+    def keep(self, state):
+        """Store a state for replay: the LiDAR (thinned) and the agent's debug only every
+        HISTORY_FULL-th tick, the poses every tick (a 1200 s run: ~25 MB, not ~150)."""
+        full = self.sim.tick % HISTORY_FULL == 0
+        drones = []
+        for d in state["drones"]:
+            d = dict(d)
+            if full and "lidar" in d:
+                pts = d["lidar"]
+                step = max(1, -(-len(pts) // 3 // HISTORY_LIDAR_PTS))
+                d["lidar"] = [v for k in range(0, len(pts) - 2, 3 * step) for v in pts[k:k + 3]]
+            elif not full:
+                d.pop("lidar", None)
+                d.pop("debug", None)
+            drones.append(d)
+        self.history.append({**state, "drones": drones})
 
     async def handler(self, ws):
         try:
@@ -61,6 +93,8 @@ class Session:
                 msg = json.loads(raw)
                 cmd = msg.get("cmd")
                 if cmd == "viewer":
+                    if self.history:
+                        await ws.send(json.dumps({"type": "history", "states": self.history}))
                     self.clients.add(ws)
                     await ws.send(json.dumps(self.sim.trails()))
                     await ws.send(json.dumps(self.sim.viewer_state()))
@@ -71,6 +105,8 @@ class Session:
                     self.paused = bool(msg.get("value", not self.paused))
                 elif cmd == "speed":
                     self.speed = float(msg["value"])
+                elif cmd == "keys":
+                    PILOT["keys"] = frozenset(msg.get("keys", []))
         finally:
             self.clients.discard(ws)
             self.sensor_clients.pop(ws, None)
@@ -103,8 +139,10 @@ class Session:
                 continue
             t0 = time.perf_counter()
             running = sim.step()
+            state = sim.viewer_state()
+            self.keep(state)
             if self.clients:
-                self.broadcast(sim.viewer_state())
+                self.broadcast(state)
                 if sim.tick % 10 == 0:
                     self.broadcast(sim.trails())
             if self.sensor_clients:
@@ -133,6 +171,7 @@ async def serve_viewer(sim, args):
             while not (session.clients or session.sensor_clients):
                 await asyncio.sleep(0.1)
         await session.loop()
+        save_record(sim, args)
         print("mission finished; viewer stays up until Ctrl+C")
         await asyncio.Future()
     httpd.shutdown()
@@ -145,8 +184,10 @@ def main():
     ap.add_argument("--drones", type=int, default=3)
     ap.add_argument("--odom", choices=["perfect", "default", "hard", "off"], default="default",
                     help="LiDAR-inertial odometry quality; off = no pos/vel, build your own")
-    ap.add_argument("--lidar", choices=["os0-32", "lite", "ideal"], default="os0-32",
+    ap.add_argument("--lidar", choices=["os0-32", "lite", "lite-top", "lite-center", "ideal"], default="os0-32",
                     help="os0-32 = Ouster OS0-32 spec (slow), lite = 16x256 beams (about 4x faster)")
+    ap.add_argument("--imu", choices=["flight", "datasheet"], default="flight",
+                    help="flight = with rotor vibration and calibration errors, datasheet = bench noise only")
     ap.add_argument("--aero", choices=["off", "default", "hard"], default="default",
                     help="gusts, wall turbulence, ceiling/ground effect near rock")
     ap.add_argument("--seed", type=int, default=0)
@@ -156,13 +197,17 @@ def main():
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--http-port", type=int, default=8000)
     ap.add_argument("--ws-port", type=int, default=8765)
+    ap.add_argument("--target-error", type=float, default=0.0,
+                    help="rescue: the survivor position given to the agent is off by this many metres")
+    ap.add_argument("--record", help="save the flown trails and the score to this JSON file at the end")
     args = ap.parse_args()
 
     map_dir = Path(args.map)
     if not map_dir.exists():
         map_dir = ROOT / "maps" / args.map
-    sim = Simulator(map_dir, args.drones, load_agent(args.agent), odom=args.odom, lidar=args.lidar,
-                    seed=args.seed, aero=args.aero)
+    sim = Simulator(map_dir, args.drones, load_agent(args.agent), cfg=SimConfig(target_error_m=args.target_error),
+                    odom=args.odom, lidar=args.lidar,
+                    seed=args.seed, aero=args.aero, imu=args.imu)
     try:
         if args.headless:
             while sim.step():
@@ -174,6 +219,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        save_record(sim, args)          # also when stopped early (Ctrl+C)
         sim.close()
 
 

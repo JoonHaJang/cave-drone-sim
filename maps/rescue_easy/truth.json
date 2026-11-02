@@ -1,0 +1,15 @@
+{
+ "artifacts": [
+  {
+   "id": 0,
+   "type": "survivor",
+   "pos": [
+    150.0,
+    -237.28,
+    20.0
+   ],
+   "yaw": -3.0543,
+   "name": "rescue_randy_4"
+  }
+ ]
+}
